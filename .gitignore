@@ -1,0 +1,30 @@
+.DS_Store
+
+# Wails build artifacts
+/build/bin/
+
+# Frontend artifacts
+/frontend/dist/*
+!/frontend/dist/.gitkeep
+/frontend/node_modules/
+/frontend/wailsjs/
+/frontend/package.json.md5
+
+# Local runtime data
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+
+# Logs and local environment
+*.log
+.env
+.env.*
+!.env.example
+
+# Editor state
+.idea/
+.vscode/
+*.swp
+*.swo
