@@ -1,4 +1,4 @@
-import {useCallback, useEffect, useMemo, useRef, useState, type ReactNode} from 'react'
+import {useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent, type ReactNode} from 'react'
 import {EditorContent, useEditor} from '@tiptap/react'
 import type {Editor} from '@tiptap/react'
 import {
@@ -48,7 +48,6 @@ function App() {
   const [selectedItemId, setSelectedItemId] = useState('')
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
   const [renamingId, setRenamingId] = useState('')
-  const [searchOpen, setSearchOpen] = useState(false)
   const [searchQuery, setSearchQuery] = useState('')
   const [searchResults, setSearchResults] = useState<Set<string>>(new Set())
   const [saveState, setSaveState] = useState<SaveState>('idle')
@@ -58,6 +57,7 @@ function App() {
   const [autosaveInterval, setAutosaveInterval] = useState(2000)
   const [draggedId, setDraggedId] = useState('')
   const [deleteTarget, setDeleteTarget] = useState<DeleteTarget>(null)
+  const [libraryWidth, setLibraryWidth] = useState(300)
 
   const flattened = useMemo(() => flattenTree(tree), [tree])
   const selectedItem = flattened.find((item) => item.id === selectedItemId)
@@ -65,7 +65,7 @@ function App() {
   const commandItem = selectedItem ?? activeItem
 
   const applyTree = useCallback((items: TreeItem[], nextTrashId: string) => {
-    setTree(items)
+    setTree(orderTree(items, nextTrashId))
     setTrashId(nextTrashId)
     setExpanded((current) => {
       const next = new Set(current)
@@ -87,6 +87,15 @@ function App() {
         if (!live) return
         applyTree(treeResponse.items, treeResponse.trashId)
         setAutosaveInterval(settings.autosaveIntervalMs)
+        if (settings.lastDocumentId) {
+          try {
+            const response = await api.OpenDocument(settings.lastDocumentId)
+            if (!live) return
+            showDocument(response, 'Opened')
+          } catch {
+            if (live) setStatus('Ready')
+          }
+        }
       } catch (error) {
         if (!live) return
         setLastError(messageFromError(error))
@@ -122,9 +131,11 @@ function App() {
     if (!activeDoc || saveState !== 'dirty') return true
     setSaveState('saving')
     try {
-      await api.FlushDocument(activeDoc.id)
+      const response = await api.FlushDocument(activeDoc.id)
+      setActiveDoc((current) => current && current.id === response.id ? {...current, updatedAt: response.updatedAt} : current)
       setSaveState('saved')
       setStatus('Saved')
+      void loadTree()
       return true
     } catch (error) {
       setSaveState('error')
@@ -138,16 +149,20 @@ function App() {
     if (!(await flushActive())) return
     try {
       const response = await api.OpenDocument(id)
-      setActiveDoc(response)
-      setSelectedItemId(id)
-      applyTree(response.tree.items, response.tree.trashId)
-      setSaveState('saved')
-      setStatus('Opened')
-      revealItem(response.item, response.tree.items)
+      showDocument(response, 'Opened')
     } catch (error) {
       setLastError(messageFromError(error))
       setSaveState('error')
     }
+  }
+
+  function showDocument(response: DocumentResponse, nextStatus: string) {
+    setActiveDoc(response)
+    setSelectedItemId(response.id)
+    applyTree(response.tree.items, response.tree.trashId)
+    setSaveState('saved')
+    setStatus(nextStatus)
+    revealItem(response.item, response.tree.items)
   }
 
   function revealItem(item: TreeItem, items: TreeItem[]) {
@@ -159,13 +174,8 @@ function App() {
     if (!(await flushActive())) return
     try {
       const response = await api.CreateDocument(parentId)
-      setActiveDoc(response)
-      setSelectedItemId(response.id)
-      applyTree(response.tree.items, response.tree.trashId)
-      setSaveState('saved')
-      setStatus('Created document')
+      showDocument(response, 'Created document')
       setRenamingId(response.id)
-      revealItem(response.item, response.tree.items)
     } catch (error) {
       setLastError(messageFromError(error))
     }
@@ -190,7 +200,7 @@ function App() {
       applyTree(response.tree.items, response.tree.trashId)
       setRenamingId('')
       if (activeDoc?.id === id) {
-        setActiveDoc((current) => current ? {...current, title: response.item.title, item: response.item} : current)
+        setActiveDoc((current) => current ? {...current, title: response.item.title, updatedAt: response.item.updatedAt, item: response.item} : current)
       }
       setStatus('Renamed')
     } catch (error) {
@@ -248,6 +258,30 @@ function App() {
     }
   }
 
+  function beginLibraryResize(event: ReactPointerEvent<HTMLDivElement>) {
+    const startX = event.clientX
+    const startWidth = libraryWidth
+    event.currentTarget.setPointerCapture(event.pointerId)
+
+    function onPointerMove(moveEvent: PointerEvent) {
+      const nextWidth = Math.min(520, Math.max(220, startWidth + moveEvent.clientX - startX))
+      setLibraryWidth(nextWidth)
+    }
+
+    function onPointerUp() {
+      window.removeEventListener('pointermove', onPointerMove)
+      window.removeEventListener('pointerup', onPointerUp)
+      window.removeEventListener('pointercancel', onPointerUp)
+      document.body.classList.remove('is-resizing-library')
+    }
+
+    event.preventDefault()
+    document.body.classList.add('is-resizing-library')
+    window.addEventListener('pointermove', onPointerMove)
+    window.addEventListener('pointerup', onPointerUp, {once: true})
+    window.addEventListener('pointercancel', onPointerUp, {once: true})
+  }
+
   const documentParent = commandItem?.parentId ?? ''
   const createParent = commandItem?.kind === 'folder' ? commandItem.id : documentParent
 
@@ -276,9 +310,6 @@ function App() {
         <EditorToolbar editor={null} disabled/>
 
         <div className="toolbar-tail">
-          <button type="button" className={searchOpen ? 'icon-button active' : 'icon-button'} onClick={() => setSearchOpen((value) => !value)} title="Search library">
-            <Search size={16}/>
-          </button>
           <button type="button" className={settingsOpen ? 'icon-button active' : 'icon-button'} onClick={() => setSettingsOpen((value) => !value)} title="Autosave settings">
             <Settings2 size={16}/>
           </button>
@@ -286,7 +317,7 @@ function App() {
         </div>
       </header>
 
-      <section className="main-layout">
+      <section className="main-layout" style={{'--library-width': `${libraryWidth}px`} as CSSProperties}>
         <aside
           className="library-panel"
           onDragOver={(event) => event.preventDefault()}
@@ -300,24 +331,25 @@ function App() {
             </div>
           </div>
 
-          {searchOpen && (
-            <label className="search-box">
-              <Search size={15}/>
-              <input
-                value={searchQuery}
-                autoFocus
-                onChange={(event) => setSearchQuery(event.target.value)}
-                onKeyDown={(event) => {
-                  if (event.key === 'Escape') setSearchQuery('')
-                }}
-                placeholder="Search documents"
-              />
-              {searchQuery && <button type="button" onClick={() => setSearchQuery('')} title="Clear search"><X size={14}/></button>}
-            </label>
-          )}
+          <label className="search-box">
+            <Search size={15}/>
+            <input
+              value={searchQuery}
+              onChange={(event) => setSearchQuery(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === 'Escape') setSearchQuery('')
+              }}
+              placeholder="Search documents"
+            />
+            {searchQuery && <button type="button" onClick={() => setSearchQuery('')} title="Clear search"><X size={14}/></button>}
+          </label>
 
           <div className="tree-scroll" role="tree" aria-label="Documents and folders">
-            {tree.length === 0 ? (
+            {tree.length === 0 && searchQuery.trim() ? (
+              <div className="empty-library">
+                <p>No matching documents.</p>
+              </div>
+            ) : tree.length === 0 ? (
               <div className="empty-library">
                 <p>No documents yet.</p>
                 <button type="button" onClick={() => void createDocument('')}>Create document</button>
@@ -348,13 +380,24 @@ function App() {
                 />
               ))
             )}
-            {searchQuery.trim() && tree.length === 0 && (
-              <div className="empty-library">
-                <p>No matching documents.</p>
-              </div>
-            )}
           </div>
         </aside>
+
+        <div
+          className="pane-resizer"
+          role="separator"
+          aria-label="Resize library pane"
+          aria-orientation="vertical"
+          aria-valuemin={220}
+          aria-valuemax={520}
+          aria-valuenow={libraryWidth}
+          tabIndex={0}
+          onPointerDown={beginLibraryResize}
+          onKeyDown={(event) => {
+            if (event.key === 'ArrowLeft') setLibraryWidth((width) => Math.max(220, width - 16))
+            if (event.key === 'ArrowRight') setLibraryWidth((width) => Math.min(520, width + 16))
+          }}
+        />
 
         <section className="document-workspace">
           {settingsOpen && (
@@ -398,7 +441,6 @@ function App() {
             <div className="empty-editor">
               <FileText size={42}/>
               <h1>Select or create a document</h1>
-              <p>Your library is stored locally in SQLite and saved automatically.</p>
               <div>
                 <button type="button" onClick={() => void createDocument('')}><Plus size={16}/>Document</button>
                 <button type="button" onClick={() => void createFolder('')}><FolderPlus size={16}/>Folder</button>
@@ -494,10 +536,21 @@ function EditorPane({document, saveState, onDraft, onFlush, onRename, onEditorRe
       </div>
       <footer className="editor-status">
         <span>{saveState === 'dirty' ? 'Pending autosave' : saveState === 'saving' ? 'Saving' : saveState === 'error' ? 'Save failed' : 'Saved'}</span>
-        <span>{editor?.storage.characterCount.words() ?? 0} words</span>
+        <span className="document-dates">
+          <span>Created {formatTimestamp(document.createdAt)}</span>
+          <span>Updated {formatTimestamp(document.updatedAt)}</span>
+        </span>
+        <span className="word-count">{editor?.storage.characterCount.words() ?? 0} words</span>
       </footer>
     </>
   )
+}
+
+function formatTimestamp(value: string) {
+  if (!value) return 'Unknown'
+  const date = new Date(value)
+  if (Number.isNaN(date.valueOf())) return value
+  return new Intl.DateTimeFormat(undefined, {dateStyle: 'medium', timeStyle: 'short'}).format(date)
 }
 
 type EditorToolbarProps = {
@@ -624,7 +677,7 @@ function TreeNode(props: TreeNodeProps) {
         }} title={isExpanded ? 'Collapse' : 'Expand'}>
           {isFolder ? (isExpanded ? <ChevronDown size={15}/> : <ChevronRight size={15}/>) : <span/>}
         </button>
-        {isFolder ? <Folder size={16}/> : <FileText size={16}/>}
+        {isTrash ? <Trash2 size={16}/> : isFolder ? <Folder size={16}/> : <FileText size={16}/>}
 
         {renamingId === item.id ? (
           <input
@@ -697,6 +750,16 @@ function SaveIndicator({state, label}: {state: SaveState, label: string}) {
       {label}
     </div>
   )
+}
+
+function orderTree(items: TreeItem[], trashId: string): TreeItem[] {
+  return [...items]
+    .sort((a, b) => {
+      if (a.id === trashId) return 1
+      if (b.id === trashId) return -1
+      return 0
+    })
+    .map((item) => ({...item, children: orderTree(item.children, trashId)}))
 }
 
 function flattenTree(items: TreeItem[]): TreeItem[] {

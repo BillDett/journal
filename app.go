@@ -23,6 +23,7 @@ const (
 	SystemTrash  = "trash"
 
 	defaultAutosaveIntervalMS = 2000
+	settingLastDocumentID     = "last_document_id"
 )
 
 type App struct {
@@ -135,6 +136,8 @@ type DocumentResponse struct {
 	Title         string         `json:"title"`
 	Content       map[string]any `json:"content"`
 	SchemaVersion int            `json:"schemaVersion"`
+	CreatedAt     string         `json:"createdAt"`
+	UpdatedAt     string         `json:"updatedAt"`
 	Item          TreeItem       `json:"item"`
 	Tree          TreeResponse   `json:"tree"`
 	SaveState     string         `json:"saveState"`
@@ -149,6 +152,7 @@ type DocumentSaveResponse struct {
 	ID        string `json:"id"`
 	SaveState string `json:"saveState"`
 	SavedAt   string `json:"savedAt"`
+	UpdatedAt string `json:"updatedAt"`
 }
 
 type SearchResponse struct {
@@ -159,7 +163,8 @@ type SearchResponse struct {
 }
 
 type AppSettingsResponse struct {
-	AutosaveIntervalMS int `json:"autosaveIntervalMs"`
+	AutosaveIntervalMS int    `json:"autosaveIntervalMs"`
+	LastDocumentID     string `json:"lastDocumentId"`
 }
 
 type AppSettingsPatch struct {
@@ -229,7 +234,6 @@ func (s *JournalService) migrate() error {
 			item_id TEXT PRIMARY KEY REFERENCES items(id) ON DELETE CASCADE,
 			schema_version INTEGER NOT NULL,
 			content_json TEXT NOT NULL,
-			search_text TEXT NOT NULL DEFAULT '',
 			created_at TEXT NOT NULL,
 			updated_at TEXT NOT NULL
 		)`,
@@ -254,7 +258,10 @@ func (s *JournalService) migrate() error {
 	if err := s.ensureTrash(); err != nil {
 		return err
 	}
-	return s.ensureSetting("autosave_interval_ms", fmt.Sprintf("%d", defaultAutosaveIntervalMS))
+	if err := s.ensureSetting("autosave_interval_ms", fmt.Sprintf("%d", defaultAutosaveIntervalMS)); err != nil {
+		return err
+	}
+	return s.ensureSetting(settingLastDocumentID, "")
 }
 
 func (s *JournalService) ensureTrash() error {
@@ -286,6 +293,25 @@ func (s *JournalService) ensureSetting(key, value string) error {
 		 VALUES (?, ?, ?)
 		 ON CONFLICT(key) DO NOTHING`,
 		key, value, now,
+	)
+	return err
+}
+
+func (s *JournalService) settingValue(key string) string {
+	var value string
+	if err := s.db.QueryRow(`SELECT value FROM app_settings WHERE key = ?`, key).Scan(&value); err != nil {
+		return ""
+	}
+	return value
+}
+
+func (s *JournalService) rememberLastDocument(id string) error {
+	now := nowString()
+	_, err := s.db.Exec(
+		`INSERT INTO app_settings (key, value, updated_at)
+		 VALUES (?, ?, ?)
+		 ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+		settingLastDocumentID, id, now,
 	)
 	return err
 }
@@ -348,8 +374,8 @@ func (s *JournalService) CreateDocument(parentID string) (DocumentResponse, erro
 		return DocumentResponse{}, err
 	}
 	if _, err := tx.Exec(
-		`INSERT INTO documents (item_id, schema_version, content_json, search_text, created_at, updated_at)
-		 VALUES (?, 1, ?, '', ?, ?)`,
+		`INSERT INTO documents (item_id, schema_version, content_json, created_at, updated_at)
+		 VALUES (?, 1, ?, ?, ?)`,
 		id, string(encoded), now, now,
 	); err != nil {
 		return DocumentResponse{}, err
@@ -540,11 +566,16 @@ func (s *JournalService) OpenDocument(id string) (DocumentResponse, error) {
 	if err != nil {
 		return DocumentResponse{}, err
 	}
+	if err := s.rememberLastDocument(id); err != nil {
+		return DocumentResponse{}, err
+	}
 	return DocumentResponse{
 		ID:            id,
 		Title:         item.Title,
 		Content:       content,
 		SchemaVersion: schemaVersion,
+		CreatedAt:     item.CreatedAt,
+		UpdatedAt:     item.UpdatedAt,
 		Item:          treeItemFromRow(item),
 		Tree:          tree,
 		SaveState:     "saved",
@@ -576,15 +607,20 @@ func (s *JournalService) FlushDocument(id string) (DocumentSaveResponse, error) 
 	}
 	s.mu.Unlock()
 	if !ok {
-		return DocumentSaveResponse{ID: id, SaveState: "saved", SavedAt: nowString()}, nil
+		item, err := s.getRowItem(id)
+		if err != nil {
+			return DocumentSaveResponse{}, err
+		}
+		return DocumentSaveResponse{ID: id, SaveState: "saved", SavedAt: nowString(), UpdatedAt: item.UpdatedAt}, nil
 	}
-	if err := s.saveDocumentContent(id, draft.Content); err != nil {
+	updatedAt, err := s.saveDocumentContent(id, draft.Content)
+	if err != nil {
 		s.mu.Lock()
 		s.pending[id] = draft
 		s.mu.Unlock()
 		return DocumentSaveResponse{}, err
 	}
-	return DocumentSaveResponse{ID: id, SaveState: "saved", SavedAt: nowString()}, nil
+	return DocumentSaveResponse{ID: id, SaveState: "saved", SavedAt: updatedAt, UpdatedAt: updatedAt}, nil
 }
 
 func (s *JournalService) FlushAll() error {
@@ -671,7 +707,10 @@ func (s *JournalService) SearchLibrary(query string) (SearchResponse, error) {
 }
 
 func (s *JournalService) GetAppSettings() (AppSettingsResponse, error) {
-	return AppSettingsResponse{AutosaveIntervalMS: s.autosaveIntervalMS()}, nil
+	return AppSettingsResponse{
+		AutosaveIntervalMS: s.autosaveIntervalMS(),
+		LastDocumentID:     s.settingValue(settingLastDocumentID),
+	}, nil
 }
 
 func (s *JournalService) UpdateAppSettings(settings AppSettingsPatch) (AppSettingsResponse, error) {
@@ -691,33 +730,36 @@ func (s *JournalService) UpdateAppSettings(settings AppSettingsPatch) (AppSettin
 	return s.GetAppSettings()
 }
 
-func (s *JournalService) saveDocumentContent(id string, content map[string]any) error {
+func (s *JournalService) saveDocumentContent(id string, content map[string]any) (string, error) {
 	if err := validateProseMirrorDoc(content); err != nil {
-		return err
+		return "", err
 	}
 	encoded, err := json.Marshal(content)
 	if err != nil {
-		return err
+		return "", err
 	}
 	now := nowString()
 	tx, err := s.db.Begin()
 	if err != nil {
-		return err
+		return "", err
 	}
 	defer rollback(tx)
 	if _, err := tx.Exec(
-		`UPDATE documents SET content_json = ?, search_text = ?, updated_at = ? WHERE item_id = ?`,
-		string(encoded), extractText(content), now, id,
+		`UPDATE documents SET content_json = ?, updated_at = ? WHERE item_id = ?`,
+		string(encoded), now, id,
 	); err != nil {
-		return err
+		return "", err
 	}
 	if _, err := tx.Exec(`UPDATE items SET updated_at = ? WHERE id = ?`, now, id); err != nil {
-		return err
+		return "", err
 	}
 	if err := s.syncFTSTx(tx, id); err != nil {
-		return err
+		return "", err
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return "", err
+	}
+	return now, nil
 }
 
 func (s *JournalService) syncFTS(db dbRunner, id string) error {
@@ -727,9 +769,15 @@ func (s *JournalService) syncFTS(db dbRunner, id string) error {
 	}
 	body := ""
 	if item.Kind == KindDocument {
-		if err := db.QueryRow(`SELECT search_text FROM documents WHERE item_id = ?`, id).Scan(&body); err != nil {
+		var encoded string
+		if err := db.QueryRow(`SELECT content_json FROM documents WHERE item_id = ?`, id).Scan(&encoded); err != nil {
 			return err
 		}
+		var content map[string]any
+		if err := json.Unmarshal([]byte(encoded), &content); err != nil {
+			return err
+		}
+		body = extractText(content)
 	}
 	if _, err := db.Exec(`DELETE FROM library_search_fts WHERE item_id = ?`, id); err != nil {
 		return err
@@ -941,6 +989,7 @@ func buildTree(items []rowItem, matches map[string]bool) []TreeItem {
 	var build func(rowItem) TreeItem
 	build = func(item rowItem) TreeItem {
 		node := treeItemFromRow(item)
+		sortRows(children[item.ID])
 		for _, child := range children[item.ID] {
 			node.Children = append(node.Children, build(child))
 		}
@@ -956,10 +1005,10 @@ func buildTree(items []rowItem, matches map[string]bool) []TreeItem {
 
 func sortRows(rows []rowItem) {
 	sort.SliceStable(rows, func(i, j int) bool {
-		if rows[i].SortOrder == rows[j].SortOrder {
+		if rows[i].UpdatedAt == rows[j].UpdatedAt {
 			return strings.ToLower(rows[i].Title) < strings.ToLower(rows[j].Title)
 		}
-		return rows[i].SortOrder < rows[j].SortOrder
+		return rows[i].UpdatedAt > rows[j].UpdatedAt
 	})
 }
 

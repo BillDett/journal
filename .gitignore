@@ -1,7 +1,7 @@
 .DS_Store
 
 # Wails build artifacts
-/build/bin/
+/build
 
 # Frontend artifacts
 /frontend/dist/*

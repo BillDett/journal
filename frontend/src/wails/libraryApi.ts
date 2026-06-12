@@ -31,6 +31,8 @@ export type DocumentResponse = {
   title: string
   content: ProseMirrorDoc
   schemaVersion: number
+  createdAt: string
+  updatedAt: string
   item: TreeItem
   tree: TreeResponse
   saveState: string
@@ -45,6 +47,7 @@ export type SearchResponse = {
 
 export type AppSettingsResponse = {
   autosaveIntervalMs: number
+  lastDocumentId: string
 }
 
 export type AppSettingsPatch = {
@@ -61,7 +64,7 @@ type BackendAPI = {
   PermanentlyDeleteItem: (id: string) => Promise<TreeResponse>
   OpenDocument: (id: string) => Promise<DocumentResponse>
   UpdateDocumentDraft: (id: string, content: ProseMirrorDoc) => Promise<{id: string, saveState: string}>
-  FlushDocument: (id: string) => Promise<{id: string, saveState: string, savedAt: string}>
+  FlushDocument: (id: string) => Promise<{id: string, saveState: string, savedAt: string, updatedAt: string}>
   SearchLibrary: (query: string) => Promise<SearchResponse>
   GetAppSettings: () => Promise<AppSettingsResponse>
   UpdateAppSettings: (settings: AppSettingsPatch) => Promise<AppSettingsResponse>

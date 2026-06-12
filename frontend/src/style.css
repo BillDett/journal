@@ -190,7 +190,7 @@ button:disabled {
 .main-layout {
   min-height: 0;
   display: grid;
-  grid-template-columns: clamp(240px, 24vw, 360px) 1fr;
+  grid-template-columns: var(--library-width, 300px) 7px minmax(0, 1fr);
 }
 
 .library-panel {
@@ -198,8 +198,36 @@ button:disabled {
   min-height: 0;
   display: flex;
   flex-direction: column;
-  border-right: 1px solid var(--line-strong);
   background: #edf1f4;
+}
+
+.pane-resizer {
+  min-width: 7px;
+  cursor: col-resize;
+  background: linear-gradient(90deg, var(--line-strong), var(--line-strong)) center / 1px 100% no-repeat;
+  position: relative;
+}
+
+.pane-resizer::after {
+  content: "";
+  position: absolute;
+  inset: 0 2px;
+  border-radius: 999px;
+}
+
+.pane-resizer:hover::after,
+.pane-resizer:focus-visible::after {
+  background: rgba(22, 127, 115, 0.2);
+}
+
+.pane-resizer:focus-visible {
+  outline: none;
+  box-shadow: var(--focus);
+}
+
+body.is-resizing-library {
+  cursor: col-resize;
+  user-select: none;
 }
 
 .library-head {
@@ -506,14 +534,27 @@ button:disabled {
 
 .editor-status {
   height: 38px;
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(120px, 1fr) auto minmax(90px, 1fr);
   align-items: center;
-  justify-content: space-between;
+  gap: 14px;
   padding: 0 28px;
   border-top: 1px solid var(--line);
   color: var(--muted);
   font-size: 12px;
   background: rgba(251, 251, 252, 0.82);
+}
+
+.document-dates {
+  display: inline-flex;
+  align-items: center;
+  gap: 14px;
+  color: var(--quiet);
+  white-space: nowrap;
+}
+
+.word-count {
+  justify-self: end;
 }
 
 .empty-editor {
