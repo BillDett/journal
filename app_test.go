@@ -36,6 +36,13 @@ func TestBootstrapCreatesTrashAndSettings(t *testing.T) {
 	if tree.Items[1].SystemKey != SystemTrash {
 		t.Fatalf("expected trash root, got %#v", tree.Items[1])
 	}
+	trashResults, err := service.SearchLibrary("Trash")
+	if err != nil {
+		t.Fatalf("search trash: %v", err)
+	}
+	if len(trashResults.ResultIDs) != 0 || findTreeItem(trashResults.Items, tree.TrashID) != nil {
+		t.Fatalf("expected trash title to be excluded from search, got ids=%#v items=%#v", trashResults.ResultIDs, trashResults.Items)
+	}
 
 	settings, err := service.GetAppSettings()
 	if err != nil {
@@ -143,6 +150,13 @@ func TestDocumentLifecycleSearchAndTrash(t *testing.T) {
 	if trash == nil || len(trash.Children) != 1 {
 		t.Fatalf("expected doc under trash, got %#v", trash)
 	}
+	results, err = service.SearchLibrary("autosave")
+	if err != nil {
+		t.Fatalf("search after trash: %v", err)
+	}
+	if len(results.ResultIDs) != 0 || findTreeItem(results.Items, tree.TrashID) != nil {
+		t.Fatalf("expected trash to be excluded from search, got ids=%#v items=%#v", results.ResultIDs, results.Items)
+	}
 	if _, err := service.MoveItemToTrash(doc.ID); err != nil {
 		t.Fatalf("delete from trash: %v", err)
 	}
@@ -186,6 +200,37 @@ func TestFolderContentsSortByLastUpdatedDescending(t *testing.T) {
 	}
 	if project.Children[0].ID != newer.ID || project.Children[1].ID != older.ID {
 		t.Fatalf("expected newest document first, got %#v", project.Children)
+	}
+}
+
+func TestFolderItemCountIncludesDescendants(t *testing.T) {
+	service := newTestService(t)
+
+	folder, err := service.CreateFolder("", "Project")
+	if err != nil {
+		t.Fatalf("create folder: %v", err)
+	}
+	if _, err := service.CreateDocument(folder.Item.ID); err != nil {
+		t.Fatalf("create document: %v", err)
+	}
+	childFolder, err := service.CreateFolder(folder.Item.ID, "Research")
+	if err != nil {
+		t.Fatalf("create child folder: %v", err)
+	}
+	if _, err := service.CreateDocument(childFolder.Item.ID); err != nil {
+		t.Fatalf("create nested document: %v", err)
+	}
+
+	tree, err := service.GetLibraryTree()
+	if err != nil {
+		t.Fatalf("tree: %v", err)
+	}
+	project := findTreeItem(tree.Items, folder.Item.ID)
+	if project == nil {
+		t.Fatal("expected project folder")
+	}
+	if project.ItemCount != 3 {
+		t.Fatalf("expected folder item badge count 3, got %d", project.ItemCount)
 	}
 }
 
@@ -316,6 +361,9 @@ func TestMoveFolderToTrashKeepsDescendants(t *testing.T) {
 	trash := findTreeItem(tree.Items, tree.TrashID)
 	if trash == nil || len(trash.Children) != 1 {
 		t.Fatalf("expected folder under trash, got %#v", trash)
+	}
+	if trash.ItemCount != 2 {
+		t.Fatalf("expected trash item badge count 2, got %d", trash.ItemCount)
 	}
 	movedFolder := trash.Children[0]
 	if movedFolder.ID != folder.Item.ID || len(movedFolder.Children) != 1 || movedFolder.Children[0].ID != doc.ID {

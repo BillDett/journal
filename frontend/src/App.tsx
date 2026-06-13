@@ -8,6 +8,7 @@ import {
   CheckSquare,
   ChevronDown,
   ChevronRight,
+  FilePlus,
   FileText,
   Folder,
   FolderPlus,
@@ -71,11 +72,6 @@ function App() {
   const applyTree = useCallback((items: TreeItem[], nextTrashId: string) => {
     setTree(orderTree(items, nextTrashId))
     setTrashId(nextTrashId)
-    setExpanded((current) => {
-      const next = new Set(current)
-      next.add(nextTrashId)
-      return next
-    })
   }, [])
 
   const loadTree = useCallback(async () => {
@@ -131,6 +127,23 @@ function App() {
     return () => window.clearTimeout(handle)
   }, [applyTree, loadTree, searchQuery])
 
+  async function refreshVisibleTree(fallbackItems?: TreeItem[], fallbackTrashId?: string) {
+    const query = searchQuery.trim()
+    if (!query) {
+      if (fallbackItems && fallbackTrashId) {
+        applyTree(fallbackItems, fallbackTrashId)
+      } else {
+        await loadTree()
+      }
+      return
+    }
+
+    const response = await api.SearchLibrary(query)
+    applyTree(response.items, response.trashId)
+    setSearchResults(new Set(response.resultIds))
+    setExpanded(expandAllContainers(response.items))
+  }
+
   async function flushActive() {
     if (!activeDoc || saveState !== 'dirty') return true
     setSaveState('saving')
@@ -139,7 +152,7 @@ function App() {
       setActiveDoc((current) => current && current.id === response.id ? {...current, updatedAt: response.updatedAt} : current)
       setSaveState('saved')
       setStatus('Saved')
-      void loadTree()
+      void refreshVisibleTree()
       return true
     } catch (error) {
       setSaveState('error')
@@ -161,12 +174,15 @@ function App() {
   }
 
   function showDocument(response: DocumentResponse, nextStatus: string) {
+    const hasSearch = Boolean(searchQuery.trim())
     setActiveDoc(response)
     setSelectedItemId(response.id)
-    applyTree(response.tree.items, response.tree.trashId)
+    if (!hasSearch) {
+      applyTree(response.tree.items, response.tree.trashId)
+    }
     setSaveState('saved')
     setStatus(nextStatus)
-    revealItem(response.item, response.tree.items)
+    revealItem(response.item, hasSearch ? tree : response.tree.items)
   }
 
   function revealItem(item: TreeItem, items: TreeItem[]) {
@@ -188,7 +204,7 @@ function App() {
   async function createFolder(parentId = '') {
     try {
       const response = await api.CreateFolder(parentId || defaultJournalId, 'New Folder')
-      applyTree(response.tree.items, response.tree.trashId)
+      await refreshVisibleTree(response.tree.items, response.tree.trashId)
       setSelectedItemId(response.item.id)
       setRenamingId(response.item.id)
       revealItem(response.item, response.tree.items)
@@ -201,7 +217,7 @@ function App() {
   async function createJournal() {
     try {
       const response = await api.CreateJournal('New Journal')
-      applyTree(response.tree.items, response.tree.trashId)
+      await refreshVisibleTree(response.tree.items, response.tree.trashId)
       setSelectedItemId(response.item.id)
       setRenamingId(response.item.id)
       setExpanded((current) => new Set([...current, response.item.id]))
@@ -214,7 +230,7 @@ function App() {
   async function renameItem(id: string, title: string) {
     try {
       const response = await api.RenameItem(id, title)
-      applyTree(response.tree.items, response.tree.trashId)
+      await refreshVisibleTree(response.tree.items, response.tree.trashId)
       setRenamingId('')
       if (activeDoc?.id === id) {
         setActiveDoc((current) => current ? {...current, title: response.item.title, updatedAt: response.item.updatedAt, item: response.item} : current)
@@ -242,7 +258,7 @@ function App() {
       const response = item.kind === 'journal'
         ? await api.DeleteJournal(id)
         : inTrash ? await api.PermanentlyDeleteItem(id) : await api.MoveItemToTrash(id)
-      applyTree(response.items, response.trashId)
+      await refreshVisibleTree(response.items, response.trashId)
       if (activeDoc && (activeDoc.id === id || isDescendantOf(flattened, activeDoc.id, id))) {
         setActiveDoc(null)
         setSaveState('idle')
@@ -262,7 +278,7 @@ function App() {
     const sourceInTrash = isDescendantOf(flattened, id, trashId)
     try {
       const response = await api.MoveItem(id, parentId, sortOrder)
-      applyTree(response.items, response.trashId)
+      await refreshVisibleTree(response.items, response.trashId)
       const copied = !sourceInTrash && sourceJournalId && targetJournalId && sourceJournalId !== targetJournalId
       setStatus(parentId === trashId ? 'Moved to Trash' : item?.kind === 'journal' ? 'Reordered journal' : copied ? 'Copied' : 'Moved')
     } catch (error) {
@@ -307,6 +323,7 @@ function App() {
 
   const documentParent = commandItem?.parentId ?? ''
   const createParent = commandItem?.kind === 'journal' || commandItem?.kind === 'folder' ? commandItem.id : documentParent || defaultJournalId
+  const creationDisabled = Boolean(searchQuery.trim())
 
   return (
     <main className="app-shell">
@@ -317,15 +334,15 @@ function App() {
         </div>
 
         <div className="toolbar-cluster" aria-label="Library actions">
-          <button type="button" onClick={() => void createJournal()} title="New journal">
+          <button type="button" onClick={() => void createJournal()} disabled={creationDisabled} title="New journal">
             <BookPlus size={16}/>
             <span>Journal</span>
           </button>
-          <button type="button" onClick={() => void createDocument(createParent)} title="New document">
+          <button type="button" onClick={() => void createDocument(createParent)} disabled={creationDisabled} title="New document">
             <Plus size={16}/>
             <span>Document</span>
           </button>
-          <button type="button" onClick={() => void createFolder(createParent)} title="New folder">
+          <button type="button" onClick={() => void createFolder(createParent)} disabled={creationDisabled} title="New folder">
             <FolderPlus size={16}/>
             <span>Folder</span>
           </button>
@@ -357,9 +374,9 @@ function App() {
           <div className="library-head">
             <strong>Journals</strong>
             <div className="mini-actions">
-              <button type="button" onClick={() => void createJournal()} title="New journal"><BookPlus size={15}/></button>
-              <button type="button" onClick={() => void createDocument(defaultJournalId)} title="New document"><Plus size={15}/></button>
-              <button type="button" onClick={() => void createFolder(defaultJournalId)} title="New folder"><FolderPlus size={15}/></button>
+              <button type="button" onClick={() => void createJournal()} disabled={creationDisabled} title="New journal"><BookPlus size={15}/></button>
+              <button type="button" onClick={() => void createDocument(defaultJournalId)} disabled={creationDisabled} title="New document"><FilePlus size={15}/></button>
+              <button type="button" onClick={() => void createFolder(defaultJournalId)} disabled={creationDisabled} title="New folder"><FolderPlus size={15}/></button>
             </div>
           </div>
 
@@ -384,7 +401,7 @@ function App() {
             ) : tree.length === 0 ? (
               <div className="empty-library">
                 <p>No journals yet.</p>
-                <button type="button" onClick={() => void createJournal()}>Create journal</button>
+                <button type="button" onClick={() => void createJournal()} disabled={creationDisabled}>Create journal</button>
               </div>
             ) : (
               tree.map((item) => (
@@ -400,6 +417,7 @@ function App() {
                   trashId={trashId}
                   draggedId={draggedId}
                   draggedItem={draggedItem}
+                  creationDisabled={creationDisabled}
                   onToggle={(id) => setExpanded((current) => toggleSet(current, id))}
                   onSelect={setSelectedItemId}
                   onOpen={(id) => void openDocument(id)}
@@ -475,8 +493,8 @@ function App() {
               <FileText size={42}/>
               <h1>Select or create a document</h1>
               <div>
-                <button type="button" onClick={() => void createDocument(defaultJournalId)}><Plus size={16}/>Document</button>
-                <button type="button" onClick={() => void createFolder(defaultJournalId)}><FolderPlus size={16}/>Folder</button>
+                <button type="button" onClick={() => void createDocument(defaultJournalId)} disabled={creationDisabled}><Plus size={16}/>Document</button>
+                <button type="button" onClick={() => void createFolder(defaultJournalId)} disabled={creationDisabled}><FolderPlus size={16}/>Folder</button>
               </div>
             </div>
           )}
@@ -648,6 +666,7 @@ type TreeNodeProps = {
   trashId: string
   draggedId: string
   draggedItem?: TreeItem
+  creationDisabled: boolean
   onToggle: (id: string) => void
   onSelect: (id: string) => void
   onOpen: (id: string) => void
@@ -739,17 +758,18 @@ function TreeNode(props: TreeNodeProps) {
           </button>
         )}
 
-        {(isJournal || isTrash) && <span className="tree-badge" title={`${item.documentCount} documents`}>{item.documentCount}</span>}
+        {isFolder && <span className="tree-badge" title={`${item.itemCount} items`}>{item.itemCount}</span>}
+        {isJournal && <span className="tree-badge" title={`${item.documentCount} documents`}>{item.documentCount}</span>}
 
         <div className="tree-actions">
           {isContainer && !isTrash && <button type="button" onClick={(event) => {
             event.stopPropagation()
             props.onCreateDocument(item.id)
-          }} title="New document"><Plus size={13}/></button>}
+          }} disabled={props.creationDisabled} title="New document"><Plus size={13}/></button>}
           {isContainer && !isTrash && <button type="button" onClick={(event) => {
             event.stopPropagation()
             props.onCreateFolder(item.id)
-          }} title="New folder"><FolderPlus size={13}/></button>}
+          }} disabled={props.creationDisabled} title="New folder"><FolderPlus size={13}/></button>}
           {!isTrash && <button type="button" onClick={(event) => {
             event.stopPropagation()
             props.onDelete(item.id)

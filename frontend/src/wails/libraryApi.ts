@@ -14,6 +14,7 @@ export type TreeItem = {
   createdAt: string
   updatedAt: string
   documentCount: number
+  itemCount: number
   children: TreeItem[]
 }
 

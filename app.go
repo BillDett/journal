@@ -128,6 +128,7 @@ type TreeItem struct {
 	CreatedAt     string     `json:"createdAt"`
 	UpdatedAt     string     `json:"updatedAt"`
 	DocumentCount int        `json:"documentCount"`
+	ItemCount     int        `json:"itemCount"`
 	Children      []TreeItem `json:"children"`
 }
 
@@ -849,6 +850,10 @@ func (s *JournalService) FlushAll() error {
 
 func (s *JournalService) SearchLibrary(query string) (SearchResponse, error) {
 	query = strings.TrimSpace(query)
+	trashID, err := s.trashID()
+	if err != nil {
+		return SearchResponse{}, err
+	}
 	if query == "" {
 		tree, err := s.GetLibraryTree()
 		if err != nil {
@@ -889,7 +894,16 @@ func (s *JournalService) SearchLibrary(query string) (SearchResponse, error) {
 	for _, item := range items {
 		byID[item.ID] = item
 	}
-	for id := range matches {
+	filteredMatches := map[string]bool{}
+	filteredResultIDs := make([]string, 0, len(resultIDs))
+	for _, id := range resultIDs {
+		if rowIsInTrash(byID, id, trashID) {
+			continue
+		}
+		filteredMatches[id] = true
+		filteredResultIDs = append(filteredResultIDs, id)
+	}
+	for id := range filteredMatches {
 		for {
 			item, ok := byID[id]
 			if !ok {
@@ -908,14 +922,10 @@ func (s *JournalService) SearchLibrary(query string) (SearchResponse, error) {
 			filtered = append(filtered, item)
 		}
 	}
-	trashID, err := s.trashID()
-	if err != nil {
-		return SearchResponse{}, err
-	}
 	return SearchResponse{
 		Query:     query,
-		Items:     buildTree(filtered, matches),
-		ResultIDs: resultIDs,
+		Items:     buildTree(filtered, filteredMatches),
+		ResultIDs: filteredResultIDs,
 		TrashID:   trashID,
 	}, nil
 }
@@ -1228,6 +1238,7 @@ func buildTree(items []rowItem, matches map[string]bool) []TreeItem {
 		for _, child := range children[item.ID] {
 			childNode := build(child)
 			node.DocumentCount += childNode.DocumentCount
+			node.ItemCount += childNode.ItemCount + 1
 			node.Children = append(node.Children, childNode)
 		}
 		if item.Kind == KindDocument {
@@ -1300,6 +1311,20 @@ func treeItemFromRow(item rowItem) TreeItem {
 		UpdatedAt: item.UpdatedAt,
 		Children:  []TreeItem{},
 	}
+}
+
+func rowIsInTrash(items map[string]rowItem, id string, trashID string) bool {
+	for id != "" {
+		if id == trashID {
+			return true
+		}
+		item, ok := items[id]
+		if !ok || !item.ParentID.Valid {
+			return false
+		}
+		id = item.ParentID.String
+	}
+	return false
 }
 
 func (s *JournalService) moveJournal(id string, requestedOrder int) (TreeResponse, error) {
