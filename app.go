@@ -18,6 +18,7 @@ import (
 )
 
 const (
+	KindJournal  = "journal"
 	KindFolder   = "folder"
 	KindDocument = "document"
 	SystemTrash  = "trash"
@@ -69,6 +70,10 @@ func (a *App) CreateFolder(parentID string, title string) (ItemResponse, error) 
 	return a.service.CreateFolder(parentID, title)
 }
 
+func (a *App) CreateJournal(title string) (ItemResponse, error) {
+	return a.service.CreateJournal(title)
+}
+
 func (a *App) RenameItem(id string, title string) (ItemResponse, error) {
 	return a.service.RenameItem(id, title)
 }
@@ -83,6 +88,10 @@ func (a *App) MoveItemToTrash(id string) (TreeResponse, error) {
 
 func (a *App) PermanentlyDeleteItem(id string) (TreeResponse, error) {
 	return a.service.PermanentlyDeleteItem(id)
+}
+
+func (a *App) DeleteJournal(id string) (TreeResponse, error) {
+	return a.service.DeleteJournal(id)
 }
 
 func (a *App) OpenDocument(id string) (DocumentResponse, error) {
@@ -110,15 +119,16 @@ func (a *App) UpdateAppSettings(settings AppSettingsPatch) (AppSettingsResponse,
 }
 
 type TreeItem struct {
-	ID        string     `json:"id"`
-	ParentID  string     `json:"parentId"`
-	Kind      string     `json:"kind"`
-	Title     string     `json:"title"`
-	SortOrder int        `json:"sortOrder"`
-	SystemKey string     `json:"systemKey"`
-	CreatedAt string     `json:"createdAt"`
-	UpdatedAt string     `json:"updatedAt"`
-	Children  []TreeItem `json:"children"`
+	ID            string     `json:"id"`
+	ParentID      string     `json:"parentId"`
+	Kind          string     `json:"kind"`
+	Title         string     `json:"title"`
+	SortOrder     int        `json:"sortOrder"`
+	SystemKey     string     `json:"systemKey"`
+	CreatedAt     string     `json:"createdAt"`
+	UpdatedAt     string     `json:"updatedAt"`
+	DocumentCount int        `json:"documentCount"`
+	Children      []TreeItem `json:"children"`
 }
 
 type TreeResponse struct {
@@ -223,7 +233,7 @@ func (s *JournalService) migrate() error {
 		`CREATE TABLE IF NOT EXISTS items (
 			id TEXT PRIMARY KEY,
 			parent_id TEXT NULL REFERENCES items(id) ON DELETE CASCADE,
-			kind TEXT NOT NULL CHECK (kind IN ('folder', 'document')),
+			kind TEXT NOT NULL CHECK (kind IN ('journal', 'folder', 'document')),
 			title TEXT NOT NULL,
 			sort_order INTEGER NOT NULL DEFAULT 0,
 			system_key TEXT NULL UNIQUE,
@@ -255,7 +265,13 @@ func (s *JournalService) migrate() error {
 			return err
 		}
 	}
+	if err := s.migrateItemsKindConstraint(); err != nil {
+		return err
+	}
 	if err := s.ensureTrash(); err != nil {
+		return err
+	}
+	if err := s.ensureDefaultJournal(); err != nil {
 		return err
 	}
 	if err := s.ensureSetting("autosave_interval_ms", fmt.Sprintf("%d", defaultAutosaveIntervalMS)); err != nil {
@@ -284,6 +300,99 @@ func (s *JournalService) ensureTrash() error {
 		return err
 	}
 	return s.syncFTS(s.db, id)
+}
+
+func (s *JournalService) migrateItemsKindConstraint() error {
+	var schema string
+	if err := s.db.QueryRow(`SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'items'`).Scan(&schema); err != nil {
+		return err
+	}
+	if strings.Contains(schema, "'journal'") {
+		return nil
+	}
+
+	if _, err := s.db.Exec(`PRAGMA foreign_keys = OFF`); err != nil {
+		return err
+	}
+	defer func() {
+		_, _ = s.db.Exec(`PRAGMA foreign_keys = ON`)
+	}()
+
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer rollback(tx)
+
+	statements := []string{
+		`ALTER TABLE documents RENAME TO documents_legacy`,
+		`ALTER TABLE items RENAME TO items_legacy`,
+		`CREATE TABLE items (
+			id TEXT PRIMARY KEY,
+			parent_id TEXT NULL REFERENCES items(id) ON DELETE CASCADE,
+			kind TEXT NOT NULL CHECK (kind IN ('journal', 'folder', 'document')),
+			title TEXT NOT NULL,
+			sort_order INTEGER NOT NULL DEFAULT 0,
+			system_key TEXT NULL UNIQUE,
+			created_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL
+		)`,
+		`CREATE TABLE documents (
+			item_id TEXT PRIMARY KEY REFERENCES items(id) ON DELETE CASCADE,
+			schema_version INTEGER NOT NULL,
+			content_json TEXT NOT NULL,
+			created_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL
+		)`,
+		`INSERT INTO items (id, parent_id, kind, title, sort_order, system_key, created_at, updated_at)
+		 SELECT id, parent_id, kind, title, sort_order, system_key, created_at, updated_at FROM items_legacy`,
+		`INSERT INTO documents (item_id, schema_version, content_json, created_at, updated_at)
+		 SELECT item_id, schema_version, content_json, created_at, updated_at FROM documents_legacy`,
+		`DROP TABLE documents_legacy`,
+		`DROP TABLE items_legacy`,
+		`CREATE INDEX IF NOT EXISTS idx_items_parent_sort ON items(parent_id, sort_order, title)`,
+	}
+	for _, statement := range statements {
+		if _, err := tx.Exec(statement); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+func (s *JournalService) ensureDefaultJournal() error {
+	journalID, err := s.firstJournalID()
+	if err != nil {
+		return err
+	}
+	if journalID == "" {
+		now := nowString()
+		journalID = uuid.NewString()
+		order, err := s.nextJournalSortOrder()
+		if err != nil {
+			return err
+		}
+		if _, err := s.db.Exec(
+			`INSERT INTO items (id, parent_id, kind, title, sort_order, created_at, updated_at)
+			 VALUES (?, NULL, ?, 'New Journal', ?, ?, ?)`,
+			journalID, KindJournal, order, now, now,
+		); err != nil {
+			return err
+		}
+		if err := s.syncFTS(s.db, journalID); err != nil {
+			return err
+		}
+	}
+
+	_, err = s.db.Exec(
+		`UPDATE items
+		 SET parent_id = ?
+		 WHERE parent_id IS NULL
+		   AND kind != ?
+		   AND COALESCE(system_key, '') != ?`,
+		journalID, KindJournal, SystemTrash,
+	)
+	return err
 }
 
 func (s *JournalService) ensureSetting(key, value string) error {
@@ -348,7 +457,8 @@ func (s *JournalService) GetLibraryTree() (TreeResponse, error) {
 }
 
 func (s *JournalService) CreateDocument(parentID string) (DocumentResponse, error) {
-	if err := s.validateParent(parentID); err != nil {
+	parentID, err := s.resolveCreateParent(parentID)
+	if err != nil {
 		return DocumentResponse{}, err
 	}
 	now := nowString()
@@ -369,7 +479,7 @@ func (s *JournalService) CreateDocument(parentID string) (DocumentResponse, erro
 	if _, err := tx.Exec(
 		`INSERT INTO items (id, parent_id, kind, title, sort_order, created_at, updated_at)
 		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		id, nullParent(parentID), KindDocument, "Untitled", order, now, now,
+		id, parentID, KindDocument, "Untitled", order, now, now,
 	); err != nil {
 		return DocumentResponse{}, err
 	}
@@ -390,7 +500,8 @@ func (s *JournalService) CreateDocument(parentID string) (DocumentResponse, erro
 }
 
 func (s *JournalService) CreateFolder(parentID string, title string) (ItemResponse, error) {
-	if err := s.validateParent(parentID); err != nil {
+	parentID, err := s.resolveCreateParent(parentID)
+	if err != nil {
 		return ItemResponse{}, err
 	}
 	title = normalizeTitle(title, "New Folder")
@@ -409,7 +520,41 @@ func (s *JournalService) CreateFolder(parentID string, title string) (ItemRespon
 	if _, err := tx.Exec(
 		`INSERT INTO items (id, parent_id, kind, title, sort_order, created_at, updated_at)
 		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		id, nullParent(parentID), KindFolder, title, order, now, now,
+		id, parentID, KindFolder, title, order, now, now,
+	); err != nil {
+		return ItemResponse{}, err
+	}
+	if err := s.syncFTSTx(tx, id); err != nil {
+		return ItemResponse{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return ItemResponse{}, err
+	}
+	item, err := s.getTreeItem(id)
+	if err != nil {
+		return ItemResponse{}, err
+	}
+	tree, err := s.GetLibraryTree()
+	return ItemResponse{Item: item, Tree: tree}, err
+}
+
+func (s *JournalService) CreateJournal(title string) (ItemResponse, error) {
+	title = normalizeTitle(title, "New Journal")
+	now := nowString()
+	id := uuid.NewString()
+	order, err := s.nextJournalSortOrder()
+	if err != nil {
+		return ItemResponse{}, err
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return ItemResponse{}, err
+	}
+	defer rollback(tx)
+	if _, err := tx.Exec(
+		`INSERT INTO items (id, parent_id, kind, title, sort_order, created_at, updated_at)
+		 VALUES (?, NULL, ?, ?, ?, ?, ?)`,
+		id, KindJournal, title, order, now, now,
 	); err != nil {
 		return ItemResponse{}, err
 	}
@@ -461,8 +606,44 @@ func (s *JournalService) RenameItem(id string, title string) (ItemResponse, erro
 }
 
 func (s *JournalService) MoveItem(id string, newParentID string, newSortOrder int) (TreeResponse, error) {
+	id = strings.TrimSpace(id)
+	newParentID = strings.TrimSpace(newParentID)
+	item, err := s.getRowItem(id)
+	if err != nil {
+		return TreeResponse{}, err
+	}
+	if item.Kind == KindJournal {
+		return s.moveJournal(id, newSortOrder)
+	}
 	if err := s.validateMove(id, newParentID); err != nil {
 		return TreeResponse{}, err
+	}
+
+	sourceJournalID, err := s.journalIDForItem(id)
+	if err != nil {
+		return TreeResponse{}, err
+	}
+	targetJournalID, err := s.journalIDForItem(newParentID)
+	if err != nil {
+		return TreeResponse{}, err
+	}
+	inTrash, err := s.isInTrash(id)
+	if err != nil {
+		return TreeResponse{}, err
+	}
+	if !inTrash && sourceJournalID != "" && targetJournalID != "" && sourceJournalID != targetJournalID {
+		tx, err := s.db.Begin()
+		if err != nil {
+			return TreeResponse{}, err
+		}
+		defer rollback(tx)
+		if _, err := s.copyItemToParentTx(tx, id, newParentID, nowString()); err != nil {
+			return TreeResponse{}, err
+		}
+		if err := tx.Commit(); err != nil {
+			return TreeResponse{}, err
+		}
+		return s.GetLibraryTree()
 	}
 
 	tx, err := s.db.Begin()
@@ -474,7 +655,7 @@ func (s *JournalService) MoveItem(id string, newParentID string, newSortOrder in
 	now := nowString()
 	if _, err := tx.Exec(
 		`UPDATE items SET parent_id = ?, updated_at = ? WHERE id = ?`,
-		nullParent(newParentID), now, id,
+		newParentID, now, id,
 	); err != nil {
 		return TreeResponse{}, err
 	}
@@ -506,6 +687,8 @@ func (s *JournalService) MoveItemToTrash(id string) (TreeResponse, error) {
 }
 
 func (s *JournalService) PermanentlyDeleteItem(id string) (TreeResponse, error) {
+	deletedIDs, _ := descendantIDs(s.db, id)
+	deletedIDs = append(deletedIDs, id)
 	trashID, err := s.trashID()
 	if err != nil {
 		return TreeResponse{}, err
@@ -534,9 +717,40 @@ func (s *JournalService) PermanentlyDeleteItem(id string) (TreeResponse, error) 
 	if err := tx.Commit(); err != nil {
 		return TreeResponse{}, err
 	}
-	s.mu.Lock()
-	delete(s.pending, id)
-	s.mu.Unlock()
+	s.removePendingIDs(deletedIDs)
+	return s.GetLibraryTree()
+}
+
+func (s *JournalService) DeleteJournal(id string) (TreeResponse, error) {
+	deletedIDs, _ := descendantIDs(s.db, id)
+	deletedIDs = append(deletedIDs, id)
+	item, err := s.getRowItem(id)
+	if err != nil {
+		return TreeResponse{}, err
+	}
+	if item.Kind != KindJournal {
+		return TreeResponse{}, fmt.Errorf("item is not a journal")
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return TreeResponse{}, err
+	}
+	defer rollback(tx)
+	if err := s.deleteFTSDescendantsTx(tx, id); err != nil {
+		return TreeResponse{}, err
+	}
+	if _, err := tx.Exec(`DELETE FROM items WHERE id = ?`, id); err != nil {
+		return TreeResponse{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return TreeResponse{}, err
+	}
+	s.removePendingIDs(deletedIDs)
+	if s.settingValue(settingLastDocumentID) != "" {
+		if _, err := s.getRowItem(s.settingValue(settingLastDocumentID)); err != nil {
+			_ = s.rememberLastDocument("")
+		}
+	}
 	return s.GetLibraryTree()
 }
 
@@ -807,17 +1021,31 @@ func (s *JournalService) deleteFTSDescendantsTx(tx *sql.Tx, id string) error {
 	return nil
 }
 
+func (s *JournalService) resolveCreateParent(parentID string) (string, error) {
+	parentID = strings.TrimSpace(parentID)
+	if parentID == "" {
+		return s.firstJournalID()
+	}
+	if err := s.validateParent(parentID); err != nil {
+		return "", err
+	}
+	return parentID, nil
+}
+
 func (s *JournalService) validateParent(parentID string) error {
 	parentID = strings.TrimSpace(parentID)
 	if parentID == "" {
-		return nil
+		return fmt.Errorf("parent journal or folder is required")
 	}
 	parent, err := s.getRowItem(parentID)
 	if err != nil {
 		return err
 	}
-	if parent.Kind != KindFolder {
-		return fmt.Errorf("parent must be a folder")
+	if parent.SystemKey.String == SystemTrash {
+		return fmt.Errorf("trash cannot contain new items directly")
+	}
+	if parent.Kind != KindFolder && parent.Kind != KindJournal {
+		return fmt.Errorf("parent must be a journal or folder")
 	}
 	return nil
 }
@@ -830,14 +1058,17 @@ func (s *JournalService) validateMove(id string, newParentID string) error {
 	if err != nil {
 		return err
 	}
-	if item.SystemKey.String == SystemTrash {
-		return fmt.Errorf("trash cannot be moved")
+	if item.SystemKey.String == SystemTrash || item.Kind == KindJournal {
+		return fmt.Errorf("item cannot be moved here")
 	}
-	if err := s.validateParent(newParentID); err != nil {
+	trashID, err := s.trashID()
+	if err != nil {
 		return err
 	}
-	if newParentID == "" {
-		return nil
+	if newParentID != trashID {
+		if err := s.validateParent(newParentID); err != nil {
+			return err
+		}
 	}
 	if id == newParentID {
 		return fmt.Errorf("folder cannot be moved into itself")
@@ -934,10 +1165,14 @@ func (s *JournalService) isInTrash(id string) (bool, error) {
 }
 
 func (s *JournalService) nextSortOrder(parentID string) (int, error) {
+	return nextSortOrderFrom(s.db, parentID)
+}
+
+func (s *JournalService) nextJournalSortOrder() (int, error) {
 	var next sql.NullInt64
 	err := s.db.QueryRow(
-		`SELECT COALESCE(MAX(sort_order), -1) + 1 FROM items WHERE parent_id IS ?`,
-		nullParent(parentID),
+		`SELECT COALESCE(MAX(sort_order), -1) + 1 FROM items WHERE parent_id IS NULL AND kind = ?`,
+		KindJournal,
 	).Scan(&next)
 	if err != nil {
 		return 0, err
@@ -989,13 +1224,18 @@ func buildTree(items []rowItem, matches map[string]bool) []TreeItem {
 	var build func(rowItem) TreeItem
 	build = func(item rowItem) TreeItem {
 		node := treeItemFromRow(item)
-		sortRows(children[item.ID])
+		sortChildRows(children[item.ID])
 		for _, child := range children[item.ID] {
-			node.Children = append(node.Children, build(child))
+			childNode := build(child)
+			node.DocumentCount += childNode.DocumentCount
+			node.Children = append(node.Children, childNode)
+		}
+		if item.Kind == KindDocument {
+			node.DocumentCount = 1
 		}
 		return node
 	}
-	sortRows(roots)
+	sortRootRows(roots)
 	tree := make([]TreeItem, 0, len(roots))
 	for _, root := range roots {
 		tree = append(tree, build(root))
@@ -1003,13 +1243,41 @@ func buildTree(items []rowItem, matches map[string]bool) []TreeItem {
 	return tree
 }
 
-func sortRows(rows []rowItem) {
+func sortRootRows(rows []rowItem) {
 	sort.SliceStable(rows, func(i, j int) bool {
-		if rows[i].UpdatedAt == rows[j].UpdatedAt {
-			return strings.ToLower(rows[i].Title) < strings.ToLower(rows[j].Title)
+		if rows[i].SystemKey.String == SystemTrash {
+			return false
 		}
-		return rows[i].UpdatedAt > rows[j].UpdatedAt
+		if rows[j].SystemKey.String == SystemTrash {
+			return true
+		}
+		if rows[i].Kind == KindJournal && rows[j].Kind == KindJournal {
+			if rows[i].SortOrder == rows[j].SortOrder {
+				return strings.ToLower(rows[i].Title) < strings.ToLower(rows[j].Title)
+			}
+			return rows[i].SortOrder < rows[j].SortOrder
+		}
+		if rows[i].Kind == KindJournal {
+			return true
+		}
+		if rows[j].Kind == KindJournal {
+			return false
+		}
+		return updatedRowsLess(rows[i], rows[j])
 	})
+}
+
+func sortChildRows(rows []rowItem) {
+	sort.SliceStable(rows, func(i, j int) bool {
+		return updatedRowsLess(rows[i], rows[j])
+	})
+}
+
+func updatedRowsLess(a, b rowItem) bool {
+	if a.UpdatedAt == b.UpdatedAt {
+		return strings.ToLower(a.Title) < strings.ToLower(b.Title)
+	}
+	return a.UpdatedAt > b.UpdatedAt
 }
 
 func treeItemFromRow(item rowItem) TreeItem {
@@ -1032,6 +1300,24 @@ func treeItemFromRow(item rowItem) TreeItem {
 		UpdatedAt: item.UpdatedAt,
 		Children:  []TreeItem{},
 	}
+}
+
+func (s *JournalService) moveJournal(id string, requestedOrder int) (TreeResponse, error) {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return TreeResponse{}, err
+	}
+	defer rollback(tx)
+	if _, err := tx.Exec(`UPDATE items SET parent_id = NULL, updated_at = ? WHERE id = ?`, nowString(), id); err != nil {
+		return TreeResponse{}, err
+	}
+	if err := reorderJournals(tx, id, requestedOrder); err != nil {
+		return TreeResponse{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return TreeResponse{}, err
+	}
+	return s.GetLibraryTree()
 }
 
 func reorderSiblings(tx *sql.Tx, parentID string, movedID string, requestedOrder int) error {
@@ -1068,6 +1354,52 @@ func reorderSiblings(tx *sql.Tx, parentID string, movedID string, requestedOrder
 	return nil
 }
 
+func reorderJournals(tx *sql.Tx, movedID string, requestedOrder int) error {
+	rows, err := tx.Query(
+		`SELECT id FROM items WHERE parent_id IS NULL AND kind = ? AND id != ? ORDER BY sort_order, title COLLATE NOCASE`,
+		KindJournal, movedID,
+	)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return err
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if requestedOrder < 0 || requestedOrder > len(ids) {
+		requestedOrder = len(ids)
+	}
+	ids = append(ids, "")
+	copy(ids[requestedOrder+1:], ids[requestedOrder:])
+	ids[requestedOrder] = movedID
+	for index, id := range ids {
+		if _, err := tx.Exec(`UPDATE items SET sort_order = ? WHERE id = ?`, index, id); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func nextSortOrderFrom(db queryRower, parentID string) (int, error) {
+	var next sql.NullInt64
+	err := db.QueryRow(
+		`SELECT COALESCE(MAX(sort_order), -1) + 1 FROM items WHERE parent_id = ?`,
+		parentID,
+	).Scan(&next)
+	if err != nil {
+		return 0, err
+	}
+	return int(next.Int64), nil
+}
+
 func descendantIDs(db queryer, id string) ([]string, error) {
 	rows, err := db.Query(
 		`WITH RECURSIVE descendants(id) AS (
@@ -1091,6 +1423,116 @@ func descendantIDs(db queryer, id string) ([]string, error) {
 		ids = append(ids, next)
 	}
 	return ids, rows.Err()
+}
+
+func (s *JournalService) firstJournalID() (string, error) {
+	var id string
+	err := s.db.QueryRow(
+		`SELECT id FROM items WHERE kind = ? AND parent_id IS NULL ORDER BY sort_order, created_at LIMIT 1`,
+		KindJournal,
+	).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	return id, nil
+}
+
+func (s *JournalService) journalIDForItem(id string) (string, error) {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return "", nil
+	}
+	for id != "" {
+		item, err := s.getRowItem(id)
+		if err != nil {
+			return "", err
+		}
+		if item.Kind == KindJournal {
+			return item.ID, nil
+		}
+		if !item.ParentID.Valid {
+			return "", nil
+		}
+		id = item.ParentID.String
+	}
+	return "", nil
+}
+
+func (s *JournalService) copyItemToParentTx(tx *sql.Tx, sourceID string, parentID string, now string) (string, error) {
+	source, err := s.getRowItemFrom(tx, sourceID)
+	if err != nil {
+		return "", err
+	}
+	if source.Kind != KindFolder && source.Kind != KindDocument {
+		return "", fmt.Errorf("only folders and documents can be copied")
+	}
+	newID := uuid.NewString()
+	order, err := nextSortOrderFrom(tx, parentID)
+	if err != nil {
+		return "", err
+	}
+	if _, err := tx.Exec(
+		`INSERT INTO items (id, parent_id, kind, title, sort_order, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		newID, parentID, source.Kind, source.Title, order, now, now,
+	); err != nil {
+		return "", err
+	}
+	if source.Kind == KindDocument {
+		var schemaVersion int
+		var encoded string
+		if err := tx.QueryRow(`SELECT schema_version, content_json FROM documents WHERE item_id = ?`, sourceID).Scan(&schemaVersion, &encoded); err != nil {
+			return "", err
+		}
+		if _, err := tx.Exec(
+			`INSERT INTO documents (item_id, schema_version, content_json, created_at, updated_at)
+			 VALUES (?, ?, ?, ?, ?)`,
+			newID, schemaVersion, encoded, now, now,
+		); err != nil {
+			return "", err
+		}
+	}
+	if err := s.syncFTSTx(tx, newID); err != nil {
+		return "", err
+	}
+	if source.Kind == KindFolder {
+		rows, err := tx.Query(`SELECT id FROM items WHERE parent_id = ? ORDER BY sort_order, title COLLATE NOCASE`, sourceID)
+		if err != nil {
+			return "", err
+		}
+		var childIDs []string
+		for rows.Next() {
+			var childID string
+			if err := rows.Scan(&childID); err != nil {
+				_ = rows.Close()
+				return "", err
+			}
+			childIDs = append(childIDs, childID)
+		}
+		if err := rows.Close(); err != nil {
+			return "", err
+		}
+		if err := rows.Err(); err != nil {
+			return "", err
+		}
+		for _, childID := range childIDs {
+			if _, err := s.copyItemToParentTx(tx, childID, newID, now); err != nil {
+				return "", err
+			}
+		}
+	}
+	return newID, nil
+}
+
+func (s *JournalService) removePendingIDs(ids []string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, itemID := range ids {
+		delete(s.pending, itemID)
+	}
 }
 
 func validateProseMirrorDoc(content map[string]any) error {

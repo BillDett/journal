@@ -7,12 +7,13 @@ export type ProseMirrorDoc = JSONContent & {
 export type TreeItem = {
   id: string
   parentId: string
-  kind: 'folder' | 'document'
+  kind: 'journal' | 'folder' | 'document'
   title: string
   sortOrder: number
   systemKey: string
   createdAt: string
   updatedAt: string
+  documentCount: number
   children: TreeItem[]
 }
 
@@ -58,10 +59,12 @@ type BackendAPI = {
   GetLibraryTree: () => Promise<TreeResponse>
   CreateDocument: (parentId: string) => Promise<DocumentResponse>
   CreateFolder: (parentId: string, title: string) => Promise<ItemResponse>
+  CreateJournal: (title: string) => Promise<ItemResponse>
   RenameItem: (id: string, title: string) => Promise<ItemResponse>
   MoveItem: (id: string, newParentId: string, newSortOrder: number) => Promise<TreeResponse>
   MoveItemToTrash: (id: string) => Promise<TreeResponse>
   PermanentlyDeleteItem: (id: string) => Promise<TreeResponse>
+  DeleteJournal: (id: string) => Promise<TreeResponse>
   OpenDocument: (id: string) => Promise<DocumentResponse>
   UpdateDocumentDraft: (id: string, content: ProseMirrorDoc) => Promise<{id: string, saveState: string}>
   FlushDocument: (id: string) => Promise<{id: string, saveState: string, savedAt: string, updatedAt: string}>
@@ -90,10 +93,12 @@ function missingBackend(): BackendAPI {
     GetLibraryTree: fail,
     CreateDocument: fail,
     CreateFolder: fail,
+    CreateJournal: fail,
     RenameItem: fail,
     MoveItem: fail,
     MoveItemToTrash: fail,
     PermanentlyDeleteItem: fail,
+    DeleteJournal: fail,
     OpenDocument: fail,
     UpdateDocumentDraft: fail,
     FlushDocument: fail,

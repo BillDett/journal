@@ -27,11 +27,14 @@ func TestBootstrapCreatesTrashAndSettings(t *testing.T) {
 	if tree.TrashID == "" {
 		t.Fatal("expected trash id")
 	}
-	if len(tree.Items) != 1 {
-		t.Fatalf("expected only trash on first run, got %d root items", len(tree.Items))
+	if len(tree.Items) != 2 {
+		t.Fatalf("expected default journal and trash on first run, got %d root items", len(tree.Items))
 	}
-	if tree.Items[0].SystemKey != SystemTrash {
-		t.Fatalf("expected trash root, got %#v", tree.Items[0])
+	if tree.Items[0].Kind != KindJournal || tree.Items[0].Title != "New Journal" {
+		t.Fatalf("expected default journal root, got %#v", tree.Items[0])
+	}
+	if tree.Items[1].SystemKey != SystemTrash {
+		t.Fatalf("expected trash root, got %#v", tree.Items[1])
 	}
 
 	settings, err := service.GetAppSettings()
@@ -123,8 +126,13 @@ func TestDocumentLifecycleSearchAndTrash(t *testing.T) {
 	if len(results.ResultIDs) != 1 || results.ResultIDs[0] != doc.ID {
 		t.Fatalf("expected document search hit, got %#v", results.ResultIDs)
 	}
-	if len(results.Items) == 0 || results.Items[0].Title != "Drafts" {
-		t.Fatalf("expected ancestor folder context, got %#v", results.Items)
+	journal := findTreeItem(results.Items, folder.Item.ParentID)
+	if journal == nil || journal.Kind != KindJournal {
+		t.Fatalf("expected journal ancestor context, got %#v", results.Items)
+	}
+	drafts := findTreeItem(results.Items, folder.Item.ID)
+	if drafts == nil || drafts.Title != "Drafts" {
+		t.Fatalf("expected folder ancestor context, got %#v", results.Items)
 	}
 
 	tree, err := service.MoveItemToTrash(doc.ID)
@@ -178,6 +186,98 @@ func TestFolderContentsSortByLastUpdatedDescending(t *testing.T) {
 	}
 	if project.Children[0].ID != newer.ID || project.Children[1].ID != older.ID {
 		t.Fatalf("expected newest document first, got %#v", project.Children)
+	}
+}
+
+func TestJournalCreateReorderAndPermanentDelete(t *testing.T) {
+	service := newTestService(t)
+
+	firstTree, err := service.GetLibraryTree()
+	if err != nil {
+		t.Fatalf("initial tree: %v", err)
+	}
+	defaultJournal := firstTree.Items[0]
+	second, err := service.CreateJournal("Second")
+	if err != nil {
+		t.Fatalf("create journal: %v", err)
+	}
+	doc, err := service.CreateDocument(second.Item.ID)
+	if err != nil {
+		t.Fatalf("create document in second journal: %v", err)
+	}
+
+	tree, err := service.MoveItem(second.Item.ID, "", 0)
+	if err != nil {
+		t.Fatalf("reorder journal: %v", err)
+	}
+	if tree.Items[0].ID != second.Item.ID || tree.Items[1].ID != defaultJournal.ID {
+		t.Fatalf("expected second journal first, got %#v", tree.Items[:2])
+	}
+	if tree.Items[0].DocumentCount != 1 {
+		t.Fatalf("expected journal document badge count 1, got %d", tree.Items[0].DocumentCount)
+	}
+
+	tree, err = service.DeleteJournal(second.Item.ID)
+	if err != nil {
+		t.Fatalf("delete journal: %v", err)
+	}
+	if findTreeItem(tree.Items, second.Item.ID) != nil {
+		t.Fatal("expected deleted journal to be removed permanently")
+	}
+	if _, err := service.OpenDocument(doc.ID); err == nil {
+		t.Fatal("expected journal delete to remove contained document")
+	}
+}
+
+func TestCrossJournalDragCopiesFolderTreeWithFreshMetadata(t *testing.T) {
+	service := newTestService(t)
+
+	tree, err := service.GetLibraryTree()
+	if err != nil {
+		t.Fatalf("tree: %v", err)
+	}
+	sourceJournal := tree.Items[0]
+	target, err := service.CreateJournal("Archive")
+	if err != nil {
+		t.Fatalf("create target journal: %v", err)
+	}
+	folder, err := service.CreateFolder(sourceJournal.ID, "Project")
+	if err != nil {
+		t.Fatalf("create folder: %v", err)
+	}
+	doc, err := service.CreateDocument(folder.Item.ID)
+	if err != nil {
+		t.Fatalf("create document: %v", err)
+	}
+	if _, err := service.RenameItem(doc.ID, "Original"); err != nil {
+		t.Fatalf("rename document: %v", err)
+	}
+	if _, err := service.db.Exec(`UPDATE items SET created_at = ?, updated_at = ? WHERE id IN (?, ?)`, "2026-01-01T10:00:00Z", "2026-01-01T10:00:00Z", folder.Item.ID, doc.ID); err != nil {
+		t.Fatalf("set old timestamps: %v", err)
+	}
+
+	copiedTree, err := service.MoveItem(folder.Item.ID, target.Item.ID, -1)
+	if err != nil {
+		t.Fatalf("copy folder across journals: %v", err)
+	}
+	original := findTreeItem(copiedTree.Items, folder.Item.ID)
+	if original == nil || original.ParentID != sourceJournal.ID {
+		t.Fatalf("expected original folder to remain in source journal, got %#v", original)
+	}
+	targetJournal := findTreeItem(copiedTree.Items, target.Item.ID)
+	if targetJournal == nil || len(targetJournal.Children) != 1 {
+		t.Fatalf("expected copied folder in target journal, got %#v", targetJournal)
+	}
+	copiedFolder := targetJournal.Children[0]
+	if copiedFolder.ID == folder.Item.ID || copiedFolder.CreatedAt == "2026-01-01T10:00:00Z" || copiedFolder.UpdatedAt == "2026-01-01T10:00:00Z" {
+		t.Fatalf("expected copied folder with fresh id/timestamps, got %#v", copiedFolder)
+	}
+	if len(copiedFolder.Children) != 1 {
+		t.Fatalf("expected copied document child, got %#v", copiedFolder.Children)
+	}
+	copiedDoc := copiedFolder.Children[0]
+	if copiedDoc.ID == doc.ID || copiedDoc.Title != "Original" || copiedDoc.CreatedAt == "2026-01-01T10:00:00Z" || copiedDoc.UpdatedAt == "2026-01-01T10:00:00Z" {
+		t.Fatalf("expected copied document with same title and fresh metadata, got %#v", copiedDoc)
 	}
 }
 

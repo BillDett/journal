@@ -3,6 +3,8 @@ import {EditorContent, useEditor} from '@tiptap/react'
 import type {Editor} from '@tiptap/react'
 import {
   Bold,
+  Book,
+  BookPlus,
   CheckSquare,
   ChevronDown,
   ChevronRight,
@@ -63,6 +65,8 @@ function App() {
   const selectedItem = flattened.find((item) => item.id === selectedItemId)
   const activeItem = activeDoc ? flattened.find((item) => item.id === activeDoc.id) : undefined
   const commandItem = selectedItem ?? activeItem
+  const defaultJournalId = tree.find((item) => item.kind === 'journal')?.id ?? ''
+  const draggedItem = draggedId ? flattened.find((item) => item.id === draggedId) : undefined
 
   const applyTree = useCallback((items: TreeItem[], nextTrashId: string) => {
     setTree(orderTree(items, nextTrashId))
@@ -119,7 +123,7 @@ function App() {
         const response = await api.SearchLibrary(searchQuery)
         applyTree(response.items, response.trashId)
         setSearchResults(new Set(response.resultIds))
-        setExpanded(expandAllFolders(response.items))
+        setExpanded(expandAllContainers(response.items))
       } catch (error) {
         setLastError(messageFromError(error))
       }
@@ -183,12 +187,25 @@ function App() {
 
   async function createFolder(parentId = '') {
     try {
-      const response = await api.CreateFolder(parentId, 'New Folder')
+      const response = await api.CreateFolder(parentId || defaultJournalId, 'New Folder')
       applyTree(response.tree.items, response.tree.trashId)
       setSelectedItemId(response.item.id)
       setRenamingId(response.item.id)
       revealItem(response.item, response.tree.items)
       setStatus('Created folder')
+    } catch (error) {
+      setLastError(messageFromError(error))
+    }
+  }
+
+  async function createJournal() {
+    try {
+      const response = await api.CreateJournal('New Journal')
+      applyTree(response.tree.items, response.tree.trashId)
+      setSelectedItemId(response.item.id)
+      setRenamingId(response.item.id)
+      setExpanded((current) => new Set([...current, response.item.id]))
+      setStatus('Created journal')
     } catch (error) {
       setLastError(messageFromError(error))
     }
@@ -221,27 +238,33 @@ function App() {
     const {item, inTrash} = deleteTarget
     const id = item.id
     setDeleteTarget(null)
-    const verb = inTrash ? 'permanently delete' : 'move to Trash'
     try {
-      const response = inTrash ? await api.PermanentlyDeleteItem(id) : await api.MoveItemToTrash(id)
+      const response = item.kind === 'journal'
+        ? await api.DeleteJournal(id)
+        : inTrash ? await api.PermanentlyDeleteItem(id) : await api.MoveItemToTrash(id)
       applyTree(response.items, response.trashId)
       if (activeDoc && (activeDoc.id === id || isDescendantOf(flattened, activeDoc.id, id))) {
         setActiveDoc(null)
         setSaveState('idle')
       }
       setSelectedItemId('')
-      setStatus(inTrash ? 'Deleted permanently' : 'Moved to Trash')
+      setStatus(item.kind === 'journal' || inTrash ? 'Deleted permanently' : 'Moved to Trash')
     } catch (error) {
       setLastError(messageFromError(error))
     }
   }
 
-  async function moveItem(id: string, parentId: string) {
+  async function moveItem(id: string, parentId: string, sortOrder = -1) {
     if (id === parentId) return
+    const item = flattened.find((entry) => entry.id === id)
+    const sourceJournalId = journalIdFor(flattened, id)
+    const targetJournalId = parentId ? journalIdFor(flattened, parentId) : ''
+    const sourceInTrash = isDescendantOf(flattened, id, trashId)
     try {
-      const response = await api.MoveItem(id, parentId, -1)
+      const response = await api.MoveItem(id, parentId, sortOrder)
       applyTree(response.items, response.trashId)
-      setStatus(parentId === trashId ? 'Moved to Trash' : 'Moved')
+      const copied = !sourceInTrash && sourceJournalId && targetJournalId && sourceJournalId !== targetJournalId
+      setStatus(parentId === trashId ? 'Moved to Trash' : item?.kind === 'journal' ? 'Reordered journal' : copied ? 'Copied' : 'Moved')
     } catch (error) {
       setLastError(messageFromError(error))
     }
@@ -283,7 +306,7 @@ function App() {
   }
 
   const documentParent = commandItem?.parentId ?? ''
-  const createParent = commandItem?.kind === 'folder' ? commandItem.id : documentParent
+  const createParent = commandItem?.kind === 'journal' || commandItem?.kind === 'folder' ? commandItem.id : documentParent || defaultJournalId
 
   return (
     <main className="app-shell">
@@ -294,6 +317,10 @@ function App() {
         </div>
 
         <div className="toolbar-cluster" aria-label="Library actions">
+          <button type="button" onClick={() => void createJournal()} title="New journal">
+            <BookPlus size={16}/>
+            <span>Journal</span>
+          </button>
           <button type="button" onClick={() => void createDocument(createParent)} title="New document">
             <Plus size={16}/>
             <span>Document</span>
@@ -321,13 +348,18 @@ function App() {
         <aside
           className="library-panel"
           onDragOver={(event) => event.preventDefault()}
-          onDrop={() => draggedId && void moveItem(draggedId, '')}
+          onDrop={() => {
+            if (!draggedId) return
+            if (draggedItem?.kind === 'journal') void moveItem(draggedId, '', -1)
+            else if (defaultJournalId) void moveItem(draggedId, defaultJournalId, -1)
+          }}
         >
           <div className="library-head">
-            <strong>Library</strong>
+            <strong>Journals</strong>
             <div className="mini-actions">
-              <button type="button" onClick={() => void createDocument('')} title="New top-level document"><Plus size={15}/></button>
-              <button type="button" onClick={() => void createFolder('')} title="New top-level folder"><FolderPlus size={15}/></button>
+              <button type="button" onClick={() => void createJournal()} title="New journal"><BookPlus size={15}/></button>
+              <button type="button" onClick={() => void createDocument(defaultJournalId)} title="New document"><Plus size={15}/></button>
+              <button type="button" onClick={() => void createFolder(defaultJournalId)} title="New folder"><FolderPlus size={15}/></button>
             </div>
           </div>
 
@@ -344,15 +376,15 @@ function App() {
             {searchQuery && <button type="button" onClick={() => setSearchQuery('')} title="Clear search"><X size={14}/></button>}
           </label>
 
-          <div className="tree-scroll" role="tree" aria-label="Documents and folders">
+          <div className="tree-scroll" role="tree" aria-label="Journals, documents, and folders">
             {tree.length === 0 && searchQuery.trim() ? (
               <div className="empty-library">
                 <p>No matching documents.</p>
               </div>
             ) : tree.length === 0 ? (
               <div className="empty-library">
-                <p>No documents yet.</p>
-                <button type="button" onClick={() => void createDocument('')}>Create document</button>
+                <p>No journals yet.</p>
+                <button type="button" onClick={() => void createJournal()}>Create journal</button>
               </div>
             ) : (
               tree.map((item) => (
@@ -367,6 +399,7 @@ function App() {
                   searchResults={searchResults}
                   trashId={trashId}
                   draggedId={draggedId}
+                  draggedItem={draggedItem}
                   onToggle={(id) => setExpanded((current) => toggleSet(current, id))}
                   onSelect={setSelectedItemId}
                   onOpen={(id) => void openDocument(id)}
@@ -376,7 +409,7 @@ function App() {
                   onCreateDocument={(id) => void createDocument(id)}
                   onCreateFolder={(id) => void createFolder(id)}
                   onDragStart={setDraggedId}
-                  onDrop={(id, parentId) => void moveItem(id, parentId)}
+                  onDrop={(id, parentId, sortOrder) => void moveItem(id, parentId, sortOrder)}
                 />
               ))
             )}
@@ -442,8 +475,8 @@ function App() {
               <FileText size={42}/>
               <h1>Select or create a document</h1>
               <div>
-                <button type="button" onClick={() => void createDocument('')}><Plus size={16}/>Document</button>
-                <button type="button" onClick={() => void createFolder('')}><FolderPlus size={16}/>Folder</button>
+                <button type="button" onClick={() => void createDocument(defaultJournalId)}><Plus size={16}/>Document</button>
+                <button type="button" onClick={() => void createFolder(defaultJournalId)}><FolderPlus size={16}/>Folder</button>
               </div>
             </div>
           )}
@@ -614,6 +647,7 @@ type TreeNodeProps = {
   searchResults: Set<string>
   trashId: string
   draggedId: string
+  draggedItem?: TreeItem
   onToggle: (id: string) => void
   onSelect: (id: string) => void
   onOpen: (id: string) => void
@@ -623,12 +657,14 @@ type TreeNodeProps = {
   onCreateDocument: (id: string) => void
   onCreateFolder: (id: string) => void
   onDragStart: (id: string) => void
-  onDrop: (id: string, parentId: string) => void
+  onDrop: (id: string, parentId: string, sortOrder: number) => void
 }
 
 function TreeNode(props: TreeNodeProps) {
-  const {item, level, activeId, selectedId, expanded, renamingId, searchResults, trashId, draggedId} = props
+  const {item, level, activeId, selectedId, expanded, renamingId, searchResults, trashId, draggedId, draggedItem} = props
+  const isJournal = item.kind === 'journal'
   const isFolder = item.kind === 'folder'
+  const isContainer = isJournal || isFolder
   const isExpanded = expanded.has(item.id)
   const isTrash = item.id === trashId
   const isMatch = searchResults.has(item.id)
@@ -636,7 +672,7 @@ function TreeNode(props: TreeNodeProps) {
 
   useEffect(() => setDraftTitle(item.title), [item.title])
 
-  const invalidDrop = draggedId && (draggedId === item.id || item.kind === 'document')
+  const invalidDrop = Boolean(draggedId && (draggedId === item.id || !isContainer || (draggedItem?.kind === 'journal' && !isJournal)))
 
   return (
     <div className="tree-row-wrap">
@@ -655,29 +691,31 @@ function TreeNode(props: TreeNodeProps) {
         onClick={() => props.onSelect(item.id)}
         onDragStart={() => props.onDragStart(item.id)}
         onDragOver={(event) => {
-          if (isFolder) event.preventDefault()
+          if (!invalidDrop && isContainer) event.preventDefault()
         }}
         onDrop={(event) => {
           event.stopPropagation()
-          if (draggedId && isFolder) props.onDrop(draggedId, item.id)
+          if (!draggedId || invalidDrop || !isContainer) return
+          if (draggedItem?.kind === 'journal') props.onDrop(draggedId, '', item.sortOrder)
+          else props.onDrop(draggedId, item.id, -1)
         }}
         onKeyDown={(event) => {
           props.onSelect(item.id)
           if (event.key === 'Enter' && item.kind === 'document') props.onOpen(item.id)
           if (event.key === 'F2' && !isTrash) props.onRenameStart(item.id)
           if (event.key === 'Delete' && !isTrash) props.onDelete(item.id)
-          if (event.key === 'ArrowRight' && isFolder) props.onToggle(item.id)
-          if (event.key === 'ArrowLeft' && isFolder) props.onToggle(item.id)
+          if (event.key === 'ArrowRight' && isContainer) props.onToggle(item.id)
+          if (event.key === 'ArrowLeft' && isContainer) props.onToggle(item.id)
         }}
         onDoubleClick={() => !isTrash && props.onRenameStart(item.id)}
       >
         <button type="button" className="tree-chevron" onClick={(event) => {
           event.stopPropagation()
-          if (isFolder) props.onToggle(item.id)
+          if (isContainer) props.onToggle(item.id)
         }} title={isExpanded ? 'Collapse' : 'Expand'}>
-          {isFolder ? (isExpanded ? <ChevronDown size={15}/> : <ChevronRight size={15}/>) : <span/>}
+          {isContainer ? (isExpanded ? <ChevronDown size={15}/> : <ChevronRight size={15}/>) : <span/>}
         </button>
-        {isTrash ? <Trash2 size={16}/> : isFolder ? <Folder size={16}/> : <FileText size={16}/>}
+        {isTrash ? <Trash2 size={16}/> : isJournal ? <Book size={16}/> : isFolder ? <Folder size={16}/> : <FileText size={16}/>}
 
         {renamingId === item.id ? (
           <input
@@ -701,12 +739,14 @@ function TreeNode(props: TreeNodeProps) {
           </button>
         )}
 
+        {(isJournal || isTrash) && <span className="tree-badge" title={`${item.documentCount} documents`}>{item.documentCount}</span>}
+
         <div className="tree-actions">
-          {isFolder && !isTrash && <button type="button" onClick={(event) => {
+          {isContainer && !isTrash && <button type="button" onClick={(event) => {
             event.stopPropagation()
             props.onCreateDocument(item.id)
           }} title="New document"><Plus size={13}/></button>}
-          {isFolder && !isTrash && <button type="button" onClick={(event) => {
+          {isContainer && !isTrash && <button type="button" onClick={(event) => {
             event.stopPropagation()
             props.onCreateFolder(item.id)
           }} title="New folder"><FolderPlus size={13}/></button>}
@@ -716,7 +756,7 @@ function TreeNode(props: TreeNodeProps) {
           }} title="Delete"><Trash2 size={13}/></button>}
         </div>
       </div>
-      {isFolder && isExpanded && item.children.map((child) => (
+      {isContainer && isExpanded && item.children.map((child) => (
         <TreeNode key={child.id} {...props} item={child} level={level + 1}/>
       ))}
     </div>
@@ -724,10 +764,12 @@ function TreeNode(props: TreeNodeProps) {
 }
 
 function DeleteDialog({target, onCancel, onConfirm}: {target: NonNullable<DeleteTarget>, onCancel: () => void, onConfirm: () => void}) {
-  const action = target.inTrash ? 'Permanently delete' : 'Move to Trash'
-  const detail = target.item.kind === 'folder'
-    ? target.inTrash ? 'This will permanently delete the folder and everything inside it.' : 'This will move the folder and everything inside it to Trash.'
-    : target.inTrash ? 'This document will be permanently removed.' : 'This document will move to Trash.'
+  const action = target.item.kind === 'journal' || target.inTrash ? 'Permanently delete' : 'Move to Trash'
+  const detail = target.item.kind === 'journal'
+    ? `This will permanently delete this journal and all ${target.item.documentCount} documents inside it. It will not go to Trash.`
+    : target.item.kind === 'folder'
+      ? target.inTrash ? 'This will permanently delete the folder and everything inside it.' : 'This will move the folder and everything inside it to Trash.'
+      : target.inTrash ? 'This document will be permanently removed.' : 'This document will move to Trash.'
 
   return (
     <div className="dialog-backdrop" role="presentation" onMouseDown={onCancel}>
@@ -736,7 +778,7 @@ function DeleteDialog({target, onCancel, onConfirm}: {target: NonNullable<Delete
         <p>{detail}</p>
         <div className="dialog-actions">
           <button type="button" onClick={onCancel}>Cancel</button>
-          <button type="button" className={target.inTrash ? 'danger-action' : ''} onClick={onConfirm}>{action}</button>
+          <button type="button" className={target.item.kind === 'journal' || target.inTrash ? 'danger-action' : ''} onClick={onConfirm}>{action}</button>
         </div>
       </section>
     </div>
@@ -766,8 +808,8 @@ function flattenTree(items: TreeItem[]): TreeItem[] {
   return items.flatMap((item) => [item, ...flattenTree(item.children)])
 }
 
-function expandAllFolders(items: TreeItem[]): Set<string> {
-  return new Set(flattenTree(items).filter((item) => item.kind === 'folder').map((item) => item.id))
+function expandAllContainers(items: TreeItem[]): Set<string> {
+  return new Set(flattenTree(items).filter((item) => item.kind === 'journal' || item.kind === 'folder').map((item) => item.id))
 }
 
 function ancestorIDs(items: TreeItem[], id: string): string[] {
@@ -784,6 +826,16 @@ function ancestorIDs(items: TreeItem[], id: string): string[] {
   }
   walk(items, [])
   return path
+}
+
+function journalIdFor(items: TreeItem[], id: string) {
+  const byId = new Map(items.map((item) => [item.id, item]))
+  let current = byId.get(id)
+  while (current) {
+    if (current.kind === 'journal') return current.id
+    current = current.parentId ? byId.get(current.parentId) : undefined
+  }
+  return ''
 }
 
 function isDescendantOf(items: TreeItem[], id: string, ancestorId: string) {
