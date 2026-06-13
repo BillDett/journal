@@ -78,6 +78,34 @@ On macOS, the packaged app is written to:
 build/bin/journal.app
 ```
 
+## Standalone macOS Build for Apple Silicon
+
+Build a standalone macOS app bundle for Apple Silicon Macs from the repository root:
+
+```sh
+wails build -clean -platform darwin/arm64
+```
+
+This builds the React frontend, embeds it in the Go/Wails application, and writes the macOS app bundle to:
+
+```text
+build/bin/journal.app
+```
+
+Run it from Finder, or from Terminal:
+
+```sh
+open build/bin/journal.app
+```
+
+The actual executable inside the bundle is:
+
+```text
+build/bin/journal.app/Contents/MacOS/journal
+```
+
+To install the app locally, copy `build/bin/journal.app` into `/Applications`.
+
 ## Data Storage
 
 By default, Journal stores its SQLite database under the operating system user config directory:
