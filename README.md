@@ -75,7 +75,7 @@ wails build
 On macOS, the packaged app is written to:
 
 ```text
-build/bin/journal.app
+build/bin/Journal.app
 ```
 
 ## Standalone macOS Build for Apple Silicon
@@ -89,22 +89,22 @@ wails build -clean -platform darwin/arm64
 This builds the React frontend, embeds it in the Go/Wails application, and writes the macOS app bundle to:
 
 ```text
-build/bin/journal.app
+build/bin/Journal.app
 ```
 
 Run it from Finder, or from Terminal:
 
 ```sh
-open build/bin/journal.app
+open build/bin/Journal.app
 ```
 
 The actual executable inside the bundle is:
 
 ```text
-build/bin/journal.app/Contents/MacOS/journal
+build/bin/Journal.app/Contents/MacOS/Journal
 ```
 
-To install the app locally, copy `build/bin/journal.app` into `/Applications`.
+To install the app locally, copy `build/bin/Journal.app` into `/Applications`.
 
 ## Data Storage
 

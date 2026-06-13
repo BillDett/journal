@@ -80,40 +80,10 @@ button:disabled {
   min-width: 900px;
   min-height: 620px;
   display: grid;
-  grid-template-rows: 54px 1fr;
+  grid-template-rows: 1fr;
   background: var(--surface);
 }
 
-.app-toolbar {
-  display: grid;
-  grid-template-columns: minmax(190px, 280px) auto 1fr auto;
-  align-items: center;
-  gap: 14px;
-  padding: 0 14px;
-  border-bottom: 1px solid var(--line);
-  background: var(--toolbar);
-}
-
-.brand-lockup {
-  display: flex;
-  align-items: center;
-  min-width: 0;
-  gap: 9px;
-}
-
-.app-mark {
-  width: 26px;
-  height: 26px;
-  border-radius: 7px;
-  display: inline-grid;
-  place-items: center;
-  background: var(--accent);
-  color: white;
-  font-weight: 760;
-}
-
-.toolbar-cluster,
-.toolbar-tail,
 .format-toolbar,
 .mini-actions,
 .tree-actions {
@@ -121,10 +91,6 @@ button:disabled {
   align-items: center;
   gap: 6px;
   min-width: 0;
-}
-
-.toolbar-tail {
-  justify-content: end;
 }
 
 .icon-button,
@@ -160,7 +126,7 @@ button:disabled {
   height: 30px;
   display: inline-flex;
   align-items: center;
-  justify-content: flex-end;
+  justify-content: flex-start;
   gap: 7px;
   color: var(--muted);
   font-size: 12px;
@@ -679,10 +645,6 @@ body.is-resizing-library {
 }
 
 @media (max-width: 1100px) {
-  .app-toolbar {
-    grid-template-columns: 170px auto 1fr;
-  }
-
   .format-toolbar {
     grid-column: 1 / -1;
     display: none;

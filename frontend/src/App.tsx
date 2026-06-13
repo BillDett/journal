@@ -19,7 +19,7 @@ import {
   Plus,
   Redo2,
   Search,
-  Settings2,
+  Settings,
   Strikethrough,
   Table2,
   Trash2,
@@ -61,11 +61,11 @@ function App() {
   const [draggedId, setDraggedId] = useState('')
   const [deleteTarget, setDeleteTarget] = useState<DeleteTarget>(null)
   const [libraryWidth, setLibraryWidth] = useState(300)
+  const autosaveTimer = useRef<number | undefined>(undefined)
+  const draftVersion = useRef(0)
+  const activeDocId = useRef('')
 
   const flattened = useMemo(() => flattenTree(tree), [tree])
-  const selectedItem = flattened.find((item) => item.id === selectedItemId)
-  const activeItem = activeDoc ? flattened.find((item) => item.id === activeDoc.id) : undefined
-  const commandItem = selectedItem ?? activeItem
   const defaultJournalId = tree.find((item) => item.kind === 'journal')?.id ?? ''
   const draggedItem = draggedId ? flattened.find((item) => item.id === draggedId) : undefined
 
@@ -78,6 +78,13 @@ function App() {
     const response = await api.GetLibraryTree()
     applyTree(response.items, response.trashId)
   }, [applyTree])
+
+  useEffect(() => {
+    activeDocId.current = activeDoc?.id ?? ''
+    window.clearTimeout(autosaveTimer.current)
+  }, [activeDoc?.id])
+
+  useEffect(() => () => window.clearTimeout(autosaveTimer.current), [])
 
   useEffect(() => {
     let live = true
@@ -144,8 +151,37 @@ function App() {
     setExpanded(expandAllContainers(response.items))
   }
 
+  function scheduleAutosaveFlush(id: string, version: number) {
+    window.clearTimeout(autosaveTimer.current)
+    autosaveTimer.current = window.setTimeout(() => {
+      void flushDraft(id, version)
+    }, autosaveInterval)
+  }
+
+  async function flushDraft(id: string, version: number) {
+    if (activeDocId.current === id && draftVersion.current === version) {
+      setSaveState('saving')
+      setStatus('Saving')
+    }
+    try {
+      const response = await api.FlushDocument(id)
+      if (activeDocId.current === id && draftVersion.current === version) {
+        setActiveDoc((current) => current && current.id === response.id ? {...current, updatedAt: response.updatedAt} : current)
+        setSaveState('saved')
+        setStatus('Saved')
+        void refreshVisibleTree()
+      }
+    } catch (error) {
+      if (activeDocId.current === id && draftVersion.current === version) {
+        setSaveState('error')
+        setLastError(messageFromError(error))
+      }
+    }
+  }
+
   async function flushActive() {
     if (!activeDoc || saveState !== 'dirty') return true
+    window.clearTimeout(autosaveTimer.current)
     setSaveState('saving')
     try {
       const response = await api.FlushDocument(activeDoc.id)
@@ -158,6 +194,27 @@ function App() {
       setSaveState('error')
       setLastError(messageFromError(error))
       return false
+    }
+  }
+
+  async function updateActiveDraft(content: ProseMirrorDoc) {
+    if (!activeDoc) return
+    const id = activeDoc.id
+    const version = draftVersion.current + 1
+    draftVersion.current = version
+    setSaveState('dirty')
+    setStatus('Autosave pending')
+    try {
+      await api.UpdateDocumentDraft(id, content)
+      if (activeDocId.current === id && draftVersion.current === version) {
+        setStatus('Autosave pending')
+        scheduleAutosaveFlush(id, version)
+      }
+    } catch (error) {
+      if (activeDocId.current === id && draftVersion.current === version) {
+        setSaveState('error')
+        setLastError(messageFromError(error))
+      }
     }
   }
 
@@ -321,46 +378,10 @@ function App() {
     window.addEventListener('pointercancel', onPointerUp, {once: true})
   }
 
-  const documentParent = commandItem?.parentId ?? ''
-  const createParent = commandItem?.kind === 'journal' || commandItem?.kind === 'folder' ? commandItem.id : documentParent || defaultJournalId
   const creationDisabled = Boolean(searchQuery.trim())
 
   return (
     <main className="app-shell">
-      <header className="app-toolbar">
-        <div className="brand-lockup">
-          <span className="app-mark">J</span>
-          <strong>Journal</strong>
-        </div>
-
-        <div className="toolbar-cluster" aria-label="Library actions">
-          <button type="button" onClick={() => void createJournal()} disabled={creationDisabled} title="New journal">
-            <BookPlus size={16}/>
-            <span>Journal</span>
-          </button>
-          <button type="button" onClick={() => void createDocument(createParent)} disabled={creationDisabled} title="New document">
-            <Plus size={16}/>
-            <span>Document</span>
-          </button>
-          <button type="button" onClick={() => void createFolder(createParent)} disabled={creationDisabled} title="New folder">
-            <FolderPlus size={16}/>
-            <span>Folder</span>
-          </button>
-          <button type="button" onClick={() => commandItem && requestDelete(commandItem.id)} disabled={!commandItem || commandItem.systemKey === 'trash'} title="Delete">
-            <Trash2 size={16}/>
-          </button>
-        </div>
-
-        <EditorToolbar editor={null} disabled/>
-
-        <div className="toolbar-tail">
-          <button type="button" className={settingsOpen ? 'icon-button active' : 'icon-button'} onClick={() => setSettingsOpen((value) => !value)} title="Autosave settings">
-            <Settings2 size={16}/>
-          </button>
-          <SaveIndicator state={saveState} label={status}/>
-        </div>
-      </header>
-
       <section className="main-layout" style={{'--library-width': `${libraryWidth}px`} as CSSProperties}>
         <aside
           className="library-panel"
@@ -377,6 +398,7 @@ function App() {
               <button type="button" onClick={() => void createJournal()} disabled={creationDisabled} title="New journal"><BookPlus size={15}/></button>
               <button type="button" onClick={() => void createDocument(defaultJournalId)} disabled={creationDisabled} title="New document"><FilePlus size={15}/></button>
               <button type="button" onClick={() => void createFolder(defaultJournalId)} disabled={creationDisabled} title="New folder"><FolderPlus size={15}/></button>
+              <button type="button" className={settingsOpen ? 'icon-button active' : 'icon-button'} onClick={() => setSettingsOpen((value) => !value)} title="Autosave settings"><Settings size={15}/></button>
             </div>
           </div>
 
@@ -472,16 +494,8 @@ function App() {
               key={activeDoc.id}
               document={activeDoc}
               saveState={saveState}
-              onDraft={async (content) => {
-                setSaveState('dirty')
-                try {
-                  await api.UpdateDocumentDraft(activeDoc.id, content)
-                  setStatus('Autosave pending')
-                } catch (error) {
-                  setSaveState('error')
-                  setLastError(messageFromError(error))
-                }
-              }}
+              status={status}
+              onDraft={updateActiveDraft}
               onFlush={() => void flushActive()}
               onRename={(title) => void renameItem(activeDoc.id, title)}
               onEditorReady={(editor) => {
@@ -522,13 +536,14 @@ function App() {
 type EditorPaneProps = {
   document: DocumentResponse
   saveState: SaveState
+  status: string
   onDraft: (content: ProseMirrorDoc) => Promise<void>
   onFlush: () => void
   onRename: (title: string) => void
   onEditorReady: (editor: Editor) => void
 }
 
-function EditorPane({document, saveState, onDraft, onFlush, onRename, onEditorReady}: EditorPaneProps) {
+function EditorPane({document, saveState, status, onDraft, onFlush, onRename, onEditorReady}: EditorPaneProps) {
   const [title, setTitle] = useState(document.title)
   const draftTimer = useRef<number | undefined>(undefined)
 
@@ -586,7 +601,7 @@ function EditorPane({document, saveState, onDraft, onFlush, onRename, onEditorRe
         <EditorContent editor={editor}/>
       </div>
       <footer className="editor-status">
-        <span>{saveState === 'dirty' ? 'Pending autosave' : saveState === 'saving' ? 'Saving' : saveState === 'error' ? 'Save failed' : 'Saved'}</span>
+        <SaveIndicator state={saveState} label={status}/>
         <span className="document-dates">
           <span>Created {formatTimestamp(document.createdAt)}</span>
           <span>Updated {formatTimestamp(document.updatedAt)}</span>
