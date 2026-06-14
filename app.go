@@ -740,6 +740,13 @@ func (s *JournalService) DeleteJournal(id string) (TreeResponse, error) {
 	if item.Kind != KindJournal {
 		return TreeResponse{}, fmt.Errorf("item is not a journal")
 	}
+	count, err := s.journalCount()
+	if err != nil {
+		return TreeResponse{}, err
+	}
+	if count <= 1 {
+		return TreeResponse{}, fmt.Errorf("at least one journal is required")
+	}
 	tx, err := s.db.Begin()
 	if err != nil {
 		return TreeResponse{}, err
@@ -1494,6 +1501,14 @@ func (s *JournalService) firstJournalID() (string, error) {
 		return "", err
 	}
 	return id, nil
+}
+
+func (s *JournalService) journalCount() (int, error) {
+	var count int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM items WHERE kind = ? AND parent_id IS NULL`, KindJournal).Scan(&count); err != nil {
+		return 0, err
+	}
+	return count, nil
 }
 
 func (s *JournalService) journalIDForItem(id string) (string, error) {

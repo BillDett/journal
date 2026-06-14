@@ -68,6 +68,7 @@ function App() {
   const activeDocId = useRef('')
 
   const flattened = useMemo(() => flattenTree(tree), [tree])
+  const journalCount = useMemo(() => tree.filter((item) => item.kind === 'journal').length, [tree])
   const defaultJournalId = tree.find((item) => item.kind === 'journal')?.id ?? ''
   const draggedItem = draggedId ? flattened.find((item) => item.id === draggedId) : undefined
 
@@ -326,6 +327,7 @@ function App() {
   function requestDelete(id: string) {
     const item = flattened.find((entry) => entry.id === id)
     if (!item || item.systemKey === 'trash') return
+    if (item.kind === 'journal' && journalCount <= 1) return
     const inTrash = isDescendantOf(flattened, id, trashId)
     setSelectedItemId(id)
     setDeleteTarget({item, inTrash})
@@ -468,6 +470,7 @@ function App() {
                   renamingId={renamingId}
                   searchResults={searchResults}
                   trashId={trashId}
+                  journalCount={journalCount}
                   draggedId={draggedId}
                   draggedItem={draggedItem}
                   creationDisabled={creationDisabled}
@@ -704,6 +707,7 @@ type TreeNodeProps = {
   renamingId: string
   searchResults: Set<string>
   trashId: string
+  journalCount: number
   draggedId: string
   draggedItem?: TreeItem
   creationDisabled: boolean
@@ -720,12 +724,13 @@ type TreeNodeProps = {
 }
 
 function TreeNode(props: TreeNodeProps) {
-  const {item, level, activeId, selectedId, expanded, renamingId, searchResults, trashId, draggedId, draggedItem} = props
+  const {item, level, activeId, selectedId, expanded, renamingId, searchResults, trashId, journalCount, draggedId, draggedItem} = props
   const isJournal = item.kind === 'journal'
   const isFolder = item.kind === 'folder'
   const isContainer = isJournal || isFolder
   const isExpanded = expanded.has(item.id)
   const isTrash = item.id === trashId
+  const deleteDisabled = isJournal && journalCount <= 1
   const isMatch = searchResults.has(item.id)
   const [draftTitle, setDraftTitle] = useState(item.title)
 
@@ -762,7 +767,7 @@ function TreeNode(props: TreeNodeProps) {
           props.onSelect(item.id)
           if (event.key === 'Enter' && item.kind === 'document') props.onOpen(item.id)
           if (event.key === 'F2' && !isTrash) props.onRenameStart(item.id)
-          if (event.key === 'Delete' && !isTrash) props.onDelete(item.id)
+          if (event.key === 'Delete' && !isTrash && !deleteDisabled) props.onDelete(item.id)
           if (event.key === 'ArrowRight' && isContainer) props.onToggle(item.id)
           if (event.key === 'ArrowLeft' && isContainer) props.onToggle(item.id)
         }}
@@ -813,7 +818,7 @@ function TreeNode(props: TreeNodeProps) {
           {!isTrash && <button type="button" onClick={(event) => {
             event.stopPropagation()
             props.onDelete(item.id)
-          }} title="Delete"><Trash2 size={13}/></button>}
+          }} disabled={deleteDisabled} title={deleteDisabled ? 'At least one journal is required' : 'Delete'}><Trash2 size={13}/></button>}
         </div>
       </div>
       {isContainer && isExpanded && item.children.map((child) => (

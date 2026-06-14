@@ -274,6 +274,26 @@ func TestJournalCreateReorderAndPermanentDelete(t *testing.T) {
 	}
 }
 
+func TestDeleteLastJournalRejected(t *testing.T) {
+	service := newTestService(t)
+
+	tree, err := service.GetLibraryTree()
+	if err != nil {
+		t.Fatalf("initial tree: %v", err)
+	}
+	journal := tree.Items[0]
+	if _, err := service.DeleteJournal(journal.ID); err == nil {
+		t.Fatal("expected deleting the last journal to fail")
+	}
+	tree, err = service.GetLibraryTree()
+	if err != nil {
+		t.Fatalf("tree after rejected delete: %v", err)
+	}
+	if findTreeItem(tree.Items, journal.ID) == nil {
+		t.Fatal("expected last journal to remain after rejected delete")
+	}
+}
+
 func TestCrossJournalDragCopiesFolderTreeWithFreshMetadata(t *testing.T) {
 	service := newTestService(t)
 
