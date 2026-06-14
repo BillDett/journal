@@ -1,0 +1,93 @@
+name: Release Builds
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+jobs:
+  validate-version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - id: version
+        run: |
+          VERSION=$(scripts/version.sh)
+          TAG="${GITHUB_REF_NAME#v}"
+
+          if [ "$VERSION" != "$TAG" ]; then
+            echo "wails.json version $VERSION does not match release tag $GITHUB_REF_NAME"
+            exit 1
+          fi
+
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+  build-macos:
+    needs: validate-version
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install Wails
+        run: go install github.com/wailsapp/wails/v2/cmd/wails@v2.12.0
+
+      - name: Build macOS app
+        run: scripts/build-macos.sh
+
+      - name: Archive macOS app
+        run: |
+          cd build/bin
+          ditto -c -k --sequesterRsrc --keepParent Journal.app Journal-macos-arm64.zip
+
+      - name: Upload macOS asset
+        uses: softprops/action-gh-release@v2
+        with:
+          files: build/bin/Journal-macos-arm64.zip
+
+  build-windows:
+    needs: validate-version
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install Wails
+        shell: pwsh
+        run: go install github.com/wailsapp/wails/v2/cmd/wails@v2.12.0
+
+      - name: Build Windows app
+        shell: bash
+        run: scripts/build-windows.sh
+
+      - name: Upload Windows asset
+        uses: softprops/action-gh-release@v2
+        with:
+          files: build/bin/Journal.exe
