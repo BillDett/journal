@@ -98,6 +98,24 @@ On macOS, the packaged app is written to:
 build/bin/Journal.app
 ```
 
+Build a Windows 64-bit executable:
+
+```sh
+wails build -platform windows/amd64
+```
+
+The Windows executable is written to:
+
+```text
+build/bin/Journal.exe
+```
+
+To build a Windows installer, add the NSIS flag:
+
+```sh
+wails build -platform windows/amd64 -nsis
+```
+
 ## Standalone macOS Build for Apple Silicon
 
 Build a standalone macOS app bundle for Apple Silicon Macs from the repository root:
@@ -132,6 +150,18 @@ By default, Journal stores its SQLite database under the operating system user c
 
 ```text
 <user-config-dir>/Journal/journal.db
+```
+
+On macOS, this is typically:
+
+```text
+/Users/<your-user>/Library/Application Support/Journal/journal.db
+```
+
+On Windows, this is typically:
+
+```text
+C:\Users\<your-user>\AppData\Roaming\Journal\journal.db
 ```
 
 For development or tests, set `JOURNAL_DB_PATH` to use a specific database file:
