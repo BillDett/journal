@@ -578,6 +578,27 @@ type EditorPaneProps = {
 
 function EditorPane({document, saveState, status, onDraft, onFlush, onRename, onEditorReady}: EditorPaneProps) {
   const [title, setTitle] = useState(document.title)
+  const editorRef = useRef<Editor | null>(null)
+  const draftTimer = useRef<number | undefined>(undefined)
+  const pendingDraft = useRef(false)
+  const onDraftRef = useRef(onDraft)
+  const onFlushRef = useRef(onFlush)
+  const onEditorReadyRef = useRef(onEditorReady)
+
+  useEffect(() => {
+    onDraftRef.current = onDraft
+    onFlushRef.current = onFlush
+    onEditorReadyRef.current = onEditorReady
+  }, [onDraft, onFlush, onEditorReady])
+
+  const submitDraft = useCallback(async () => {
+    const editor = editorRef.current
+    if (!editor) return
+    window.clearTimeout(draftTimer.current)
+    pendingDraft.current = false
+    const content = editor.getJSON() as ProseMirrorDoc
+    await onDraftRef.current(content)
+  }, [])
 
   const editor = useEditor({
     extensions: editorExtensions,
@@ -588,16 +609,34 @@ function EditorPane({document, saveState, status, onDraft, onFlush, onRename, on
         class: 'editor-page',
       },
     },
-    onCreate: ({editor}) => onEditorReady(editor),
+    onCreate: ({editor}) => {
+      editorRef.current = editor
+      onEditorReadyRef.current(editor)
+    },
     onUpdate: ({editor}) => {
-      const content = editor.getJSON() as ProseMirrorDoc
-      void onDraft(content)
+      editorRef.current = editor
+      pendingDraft.current = true
+      window.clearTimeout(draftTimer.current)
+      draftTimer.current = window.setTimeout(() => {
+        void submitDraft()
+      }, 300)
     },
   })
 
   useEffect(() => {
     setTitle(document.title)
   }, [document.id, document.title])
+
+  useEffect(() => () => window.clearTimeout(draftTimer.current), [])
+
+  function flushEditor() {
+    void (async () => {
+      if (pendingDraft.current) {
+        await submitDraft()
+      }
+      onFlushRef.current()
+    })()
+  }
 
   function commitTitle() {
     const next = title.trim() || 'Untitled'
@@ -624,7 +663,7 @@ function EditorPane({document, saveState, status, onDraft, onFlush, onRename, on
         />
         <EditorToolbar editor={editor}/>
       </div>
-      <div className="paper-scroll" onBlur={onFlush}>
+      <div className="paper-scroll" onBlur={flushEditor}>
         <EditorContent editor={editor}/>
       </div>
       <footer className="editor-status">

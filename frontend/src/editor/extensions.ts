@@ -48,7 +48,5 @@ export const editorExtensions = [
   TextAlign.configure({
     types: ['heading', 'paragraph'],
   }),
-  CharacterCount.configure({
-    limit: 20000,
-  }),
+  CharacterCount,
 ]
