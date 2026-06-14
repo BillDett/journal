@@ -1,4 +1,8 @@
-# Journal
+<p align="center">
+  <img src="build/appicon.png" alt="Journal application icon" width="128">
+</p>
+
+<h1 align="center">Journal</h1>
 
 Journal is a local desktop writing application built with Wails, Go, React, TypeScript, Tiptap, ProseMirror, and SQLite.
 
@@ -57,6 +61,22 @@ Run backend tests:
 
 ```sh
 go test ./...
+```
+
+Generate a stress-test SQLite database:
+
+```sh
+go run ./cmd/stressdb -out /tmp/journal-stress.db -journals 5 -min-folders 50 -max-folders 100 -nested-percent 40 -min-documents 500 -max-documents 1000 -min-words 200 -max-words 1000
+```
+
+The generator writes the same `items`, `documents`, `library_search_fts`, and `app_settings` schema used by Journal. Use `-overwrite` to replace an existing output file. Useful profiles:
+
+```sh
+# Many large documents
+go run ./cmd/stressdb -out /tmp/journal-large-docs.db -journals 2 -min-documents 100 -max-documents 100 -min-words 10000 -max-words 25000 -overwrite
+
+# Folder-heavy nested library
+go run ./cmd/stressdb -out /tmp/journal-folders.db -journals 1 -min-folders 10000 -max-folders 10000 -nested-percent 80 -min-documents 10 -max-documents 10 -overwrite
 ```
 
 Build the frontend only:

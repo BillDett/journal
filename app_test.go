@@ -1,6 +1,7 @@
 package main
 
 import (
+	"os/exec"
 	"path/filepath"
 	"testing"
 )
@@ -15,6 +16,52 @@ func newTestService(t *testing.T) *JournalService {
 		_ = service.Close()
 	})
 	return service
+}
+
+func TestStressDatabaseOpensWithJournalService(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "stress.db")
+	cmd := exec.Command("go", "run", "./cmd/stressdb",
+		"-out", dbPath,
+		"-journals", "2",
+		"-min-folders", "4",
+		"-max-folders", "4",
+		"-nested-percent", "75",
+		"-min-documents", "5",
+		"-max-documents", "5",
+		"-min-words", "20",
+		"-max-words", "20",
+		"-seed", "7",
+		"-report-every-docs", "0",
+	)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("generate stress database: %v\n%s", err, output)
+	}
+
+	service, err := OpenJournalService(dbPath)
+	if err != nil {
+		t.Fatalf("open generated database: %v", err)
+	}
+	defer service.Close()
+
+	tree, err := service.GetLibraryTree()
+	if err != nil {
+		t.Fatalf("tree: %v", err)
+	}
+	if len(tree.Items) != 3 {
+		t.Fatalf("expected 2 journals and trash, got %#v", tree.Items)
+	}
+	if tree.Items[0].DocumentCount != 5 || tree.Items[1].DocumentCount != 5 {
+		t.Fatalf("expected generated document counts, got %#v", tree.Items)
+	}
+
+	results, err := service.SearchLibrary("Document 0001-000001")
+	if err != nil {
+		t.Fatalf("search generated database: %v", err)
+	}
+	if len(results.ResultIDs) != 1 {
+		t.Fatalf("expected generated document title search hit, got %#v", results.ResultIDs)
+	}
 }
 
 func TestBootstrapCreatesTrashAndSettings(t *testing.T) {

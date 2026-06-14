@@ -426,7 +426,6 @@ function App() {
           }}
         >
           <div className="library-head">
-            <strong>Journals</strong>
             <div className="mini-actions">
               <button type="button" onClick={() => void createJournal()} disabled={creationDisabled} title="New journal"><BookPlus size={15}/></button>
               <button type="button" onClick={() => void createDocument(defaultJournalId)} disabled={creationDisabled} title="New document"><FilePlus size={15}/></button>
