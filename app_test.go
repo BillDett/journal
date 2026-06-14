@@ -112,7 +112,7 @@ func TestDocumentLifecycleSearchAndTrash(t *testing.T) {
 			},
 		},
 	}
-	if _, err := service.UpdateDocumentDraft(doc.ID, content); err != nil {
+	if _, err := service.UpdateDocumentDraft(doc.ID, content, 1); err != nil {
 		t.Fatalf("draft: %v", err)
 	}
 	if _, err := service.FlushDocument(doc.ID); err != nil {
@@ -323,6 +323,99 @@ func TestCrossJournalDragCopiesFolderTreeWithFreshMetadata(t *testing.T) {
 	copiedDoc := copiedFolder.Children[0]
 	if copiedDoc.ID == doc.ID || copiedDoc.Title != "Original" || copiedDoc.CreatedAt == "2026-01-01T10:00:00Z" || copiedDoc.UpdatedAt == "2026-01-01T10:00:00Z" {
 		t.Fatalf("expected copied document with same title and fresh metadata, got %#v", copiedDoc)
+	}
+}
+
+func TestDraftVersionsRejectStaleContent(t *testing.T) {
+	service := newTestService(t)
+
+	doc, err := service.CreateDocument("")
+	if err != nil {
+		t.Fatalf("create document: %v", err)
+	}
+	older := proseMirrorDoc("older draft")
+	newer := proseMirrorDoc("newer draft")
+	if _, err := service.UpdateDocumentDraft(doc.ID, newer, 2); err != nil {
+		t.Fatalf("newer draft: %v", err)
+	}
+	if response, err := service.UpdateDocumentDraft(doc.ID, older, 1); err != nil {
+		t.Fatalf("stale draft should be ignored without error: %v", err)
+	} else if response.Version != 2 {
+		t.Fatalf("expected stale response to report accepted version 2, got %d", response.Version)
+	}
+	if _, err := service.FlushDocument(doc.ID); err != nil {
+		t.Fatalf("flush: %v", err)
+	}
+	opened, err := service.OpenDocument(doc.ID)
+	if err != nil {
+		t.Fatalf("open document: %v", err)
+	}
+	if text := extractText(opened.Content); text != "newer draft" {
+		t.Fatalf("expected newest draft to persist, got %q", text)
+	}
+	if _, err := service.UpdateDocumentDraft(doc.ID, older, 1); err != nil {
+		t.Fatalf("post-flush stale draft should be ignored without error: %v", err)
+	}
+	if _, err := service.FlushDocument(doc.ID); err != nil {
+		t.Fatalf("flush stale: %v", err)
+	}
+	opened, err = service.OpenDocument(doc.ID)
+	if err != nil {
+		t.Fatalf("reopen document: %v", err)
+	}
+	if text := extractText(opened.Content); text != "newer draft" {
+		t.Fatalf("expected stale draft not to resurrect, got %q", text)
+	}
+}
+
+func TestCrossJournalCopyUsesPendingDraftContent(t *testing.T) {
+	service := newTestService(t)
+
+	tree, err := service.GetLibraryTree()
+	if err != nil {
+		t.Fatalf("tree: %v", err)
+	}
+	sourceJournal := tree.Items[0]
+	target, err := service.CreateJournal("Archive")
+	if err != nil {
+		t.Fatalf("create target journal: %v", err)
+	}
+	doc, err := service.CreateDocument(sourceJournal.ID)
+	if err != nil {
+		t.Fatalf("create document: %v", err)
+	}
+	if _, err := service.UpdateDocumentDraft(doc.ID, proseMirrorDoc("pending copy text"), 1); err != nil {
+		t.Fatalf("pending draft: %v", err)
+	}
+
+	copiedTree, err := service.MoveItem(doc.ID, target.Item.ID, -1)
+	if err != nil {
+		t.Fatalf("copy document across journals: %v", err)
+	}
+	targetJournal := findTreeItem(copiedTree.Items, target.Item.ID)
+	if targetJournal == nil || len(targetJournal.Children) != 1 {
+		t.Fatalf("expected copied document in target journal, got %#v", targetJournal)
+	}
+	copied, err := service.OpenDocument(targetJournal.Children[0].ID)
+	if err != nil {
+		t.Fatalf("open copied document: %v", err)
+	}
+	if text := extractText(copied.Content); text != "pending copy text" {
+		t.Fatalf("expected copy to use pending draft, got %q", text)
+	}
+}
+
+func proseMirrorDoc(text string) map[string]any {
+	return map[string]any{
+		"type": "doc",
+		"content": []any{
+			map[string]any{
+				"type": "paragraph",
+				"content": []any{
+					map[string]any{"type": "text", "text": text},
+				},
+			},
+		},
 	}
 }
 

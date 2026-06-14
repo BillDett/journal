@@ -98,8 +98,8 @@ func (a *App) OpenDocument(id string) (DocumentResponse, error) {
 	return a.service.OpenDocument(id)
 }
 
-func (a *App) UpdateDocumentDraft(id string, content map[string]any) (DocumentDraftResponse, error) {
-	return a.service.UpdateDocumentDraft(id, content)
+func (a *App) UpdateDocumentDraft(id string, content map[string]any, version int64) (DocumentDraftResponse, error) {
+	return a.service.UpdateDocumentDraft(id, content, version)
 }
 
 func (a *App) FlushDocument(id string) (DocumentSaveResponse, error) {
@@ -157,6 +157,7 @@ type DocumentResponse struct {
 type DocumentDraftResponse struct {
 	ID        string `json:"id"`
 	SaveState string `json:"saveState"`
+	Version   int64  `json:"version"`
 }
 
 type DocumentSaveResponse struct {
@@ -164,6 +165,7 @@ type DocumentSaveResponse struct {
 	SaveState string `json:"saveState"`
 	SavedAt   string `json:"savedAt"`
 	UpdatedAt string `json:"updatedAt"`
+	Version   int64  `json:"version"`
 }
 
 type SearchResponse struct {
@@ -196,12 +198,14 @@ type rowItem struct {
 type pendingDraft struct {
 	Content   map[string]any
 	UpdatedAt time.Time
+	Version   int64
 }
 
 type JournalService struct {
-	db      *sql.DB
-	mu      sync.Mutex
-	pending map[string]pendingDraft
+	db               *sql.DB
+	mu               sync.Mutex
+	pending          map[string]pendingDraft
+	lastDraftVersion map[string]int64
 }
 
 func OpenJournalService(path string) (*JournalService, error) {
@@ -214,7 +218,11 @@ func OpenJournalService(path string) (*JournalService, error) {
 	}
 	db.SetMaxOpenConns(1)
 
-	service := &JournalService{db: db, pending: map[string]pendingDraft{}}
+	service := &JournalService{
+		db:               db,
+		pending:          map[string]pendingDraft{},
+		lastDraftVersion: map[string]int64{},
+	}
 	if err := service.migrate(); err != nil {
 		_ = db.Close()
 		return nil, err
@@ -797,7 +805,10 @@ func (s *JournalService) OpenDocument(id string) (DocumentResponse, error) {
 	}, nil
 }
 
-func (s *JournalService) UpdateDocumentDraft(id string, content map[string]any) (DocumentDraftResponse, error) {
+func (s *JournalService) UpdateDocumentDraft(id string, content map[string]any, version int64) (DocumentDraftResponse, error) {
+	if version < 1 {
+		return DocumentDraftResponse{}, fmt.Errorf("draft version must be positive")
+	}
 	if err := validateProseMirrorDoc(content); err != nil {
 		return DocumentDraftResponse{}, err
 	}
@@ -809,9 +820,15 @@ func (s *JournalService) UpdateDocumentDraft(id string, content map[string]any) 
 		return DocumentDraftResponse{}, fmt.Errorf("item is not a document")
 	}
 	s.mu.Lock()
-	s.pending[id] = pendingDraft{Content: cloneMap(content), UpdatedAt: time.Now()}
+	if version <= s.lastDraftVersion[id] {
+		currentVersion := s.lastDraftVersion[id]
+		s.mu.Unlock()
+		return DocumentDraftResponse{ID: id, SaveState: "dirty", Version: currentVersion}, nil
+	}
+	s.pending[id] = pendingDraft{Content: cloneMap(content), UpdatedAt: time.Now(), Version: version}
+	s.lastDraftVersion[id] = version
 	s.mu.Unlock()
-	return DocumentDraftResponse{ID: id, SaveState: "dirty"}, nil
+	return DocumentDraftResponse{ID: id, SaveState: "dirty", Version: version}, nil
 }
 
 func (s *JournalService) FlushDocument(id string) (DocumentSaveResponse, error) {
@@ -826,16 +843,30 @@ func (s *JournalService) FlushDocument(id string) (DocumentSaveResponse, error) 
 		if err != nil {
 			return DocumentSaveResponse{}, err
 		}
-		return DocumentSaveResponse{ID: id, SaveState: "saved", SavedAt: nowString(), UpdatedAt: item.UpdatedAt}, nil
+		s.mu.Lock()
+		version := s.lastDraftVersion[id]
+		s.mu.Unlock()
+		return DocumentSaveResponse{ID: id, SaveState: "saved", SavedAt: nowString(), UpdatedAt: item.UpdatedAt, Version: version}, nil
 	}
 	updatedAt, err := s.saveDocumentContent(id, draft.Content)
 	if err != nil {
 		s.mu.Lock()
-		s.pending[id] = draft
+		current, exists := s.pending[id]
+		if !exists || current.Version < draft.Version {
+			s.pending[id] = draft
+		}
+		if s.lastDraftVersion[id] < draft.Version {
+			s.lastDraftVersion[id] = draft.Version
+		}
 		s.mu.Unlock()
 		return DocumentSaveResponse{}, err
 	}
-	return DocumentSaveResponse{ID: id, SaveState: "saved", SavedAt: updatedAt, UpdatedAt: updatedAt}, nil
+	s.mu.Lock()
+	if s.lastDraftVersion[id] < draft.Version {
+		s.lastDraftVersion[id] = draft.Version
+	}
+	s.mu.Unlock()
+	return DocumentSaveResponse{ID: id, SaveState: "saved", SavedAt: updatedAt, UpdatedAt: updatedAt, Version: draft.Version}, nil
 }
 
 func (s *JournalService) FlushAll() error {
@@ -1512,6 +1543,13 @@ func (s *JournalService) copyItemToParentTx(tx *sql.Tx, sourceID string, parentI
 		if err := tx.QueryRow(`SELECT schema_version, content_json FROM documents WHERE item_id = ?`, sourceID).Scan(&schemaVersion, &encoded); err != nil {
 			return "", err
 		}
+		if draft, ok := s.pendingDraftSnapshot(sourceID); ok {
+			data, err := json.Marshal(draft.Content)
+			if err != nil {
+				return "", err
+			}
+			encoded = string(data)
+		}
 		if _, err := tx.Exec(
 			`INSERT INTO documents (item_id, schema_version, content_json, created_at, updated_at)
 			 VALUES (?, ?, ?, ?, ?)`,
@@ -1557,7 +1595,19 @@ func (s *JournalService) removePendingIDs(ids []string) {
 	defer s.mu.Unlock()
 	for _, itemID := range ids {
 		delete(s.pending, itemID)
+		delete(s.lastDraftVersion, itemID)
 	}
+}
+
+func (s *JournalService) pendingDraftSnapshot(id string) (pendingDraft, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	draft, ok := s.pending[id]
+	if !ok {
+		return pendingDraft{}, false
+	}
+	draft.Content = cloneMap(draft.Content)
+	return draft, true
 }
 
 func validateProseMirrorDoc(content map[string]any) error {

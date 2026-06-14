@@ -62,6 +62,8 @@ function App() {
   const [deleteTarget, setDeleteTarget] = useState<DeleteTarget>(null)
   const [libraryWidth, setLibraryWidth] = useState(300)
   const autosaveTimer = useRef<number | undefined>(undefined)
+  const latestDraft = useRef<{id: string, content: ProseMirrorDoc, version: number} | null>(null)
+  const sentDraftVersion = useRef(0)
   const draftVersion = useRef(0)
   const activeDocId = useRef('')
 
@@ -165,7 +167,11 @@ function App() {
     }
     try {
       const response = await api.FlushDocument(id)
-      if (activeDocId.current === id && draftVersion.current === version) {
+      sentDraftVersion.current = Math.max(sentDraftVersion.current, response.version)
+      if (latestDraft.current?.id === id && latestDraft.current.version <= response.version) {
+        latestDraft.current = null
+      }
+      if (activeDocId.current === id && draftVersion.current <= response.version) {
         setActiveDoc((current) => current && current.id === response.id ? {...current, updatedAt: response.updatedAt} : current)
         setSaveState('saved')
         setStatus('Saved')
@@ -180,14 +186,29 @@ function App() {
   }
 
   async function flushActive() {
-    if (!activeDoc || saveState !== 'dirty') return true
+    if (!activeDoc) return true
+    const draft = latestDraft.current?.id === activeDoc.id ? latestDraft.current : null
+    if (saveState !== 'dirty' && !draft) return true
     window.clearTimeout(autosaveTimer.current)
     setSaveState('saving')
     try {
+      if (draft && draft.version > sentDraftVersion.current) {
+        const draftResponse = await api.UpdateDocumentDraft(draft.id, draft.content, draft.version)
+        sentDraftVersion.current = Math.max(sentDraftVersion.current, draftResponse.version)
+      }
       const response = await api.FlushDocument(activeDoc.id)
+      sentDraftVersion.current = Math.max(sentDraftVersion.current, response.version)
+      if (latestDraft.current?.id === activeDoc.id && latestDraft.current.version <= response.version) {
+        latestDraft.current = null
+      }
       setActiveDoc((current) => current && current.id === response.id ? {...current, updatedAt: response.updatedAt} : current)
-      setSaveState('saved')
-      setStatus('Saved')
+      if (!latestDraft.current || latestDraft.current.id !== activeDoc.id) {
+        setSaveState('saved')
+        setStatus('Saved')
+      } else {
+        setSaveState('dirty')
+        setStatus('Autosave pending')
+      }
       void refreshVisibleTree()
       return true
     } catch (error) {
@@ -202,10 +223,13 @@ function App() {
     const id = activeDoc.id
     const version = draftVersion.current + 1
     draftVersion.current = version
+    latestDraft.current = {id, content, version}
+    window.clearTimeout(autosaveTimer.current)
     setSaveState('dirty')
     setStatus('Autosave pending')
     try {
-      await api.UpdateDocumentDraft(id, content)
+      const response = await api.UpdateDocumentDraft(id, content, version)
+      sentDraftVersion.current = Math.max(sentDraftVersion.current, response.version)
       if (activeDocId.current === id && draftVersion.current === version) {
         setStatus('Autosave pending')
         scheduleAutosaveFlush(id, version)
@@ -232,6 +256,7 @@ function App() {
 
   function showDocument(response: DocumentResponse, nextStatus: string) {
     const hasSearch = Boolean(searchQuery.trim())
+    latestDraft.current = null
     setActiveDoc(response)
     setSelectedItemId(response.id)
     if (!hasSearch) {
@@ -312,6 +337,9 @@ function App() {
     const id = item.id
     setDeleteTarget(null)
     try {
+      if (activeDoc && (activeDoc.id === id || isDescendantOf(flattened, activeDoc.id, id))) {
+        if (!(await flushActive())) return
+      }
       const response = item.kind === 'journal'
         ? await api.DeleteJournal(id)
         : inTrash ? await api.PermanentlyDeleteItem(id) : await api.MoveItemToTrash(id)
@@ -334,6 +362,9 @@ function App() {
     const targetJournalId = parentId ? journalIdFor(flattened, parentId) : ''
     const sourceInTrash = isDescendantOf(flattened, id, trashId)
     try {
+      if (activeDoc && (activeDoc.id === id || isDescendantOf(flattened, activeDoc.id, id))) {
+        if (!(await flushActive())) return
+      }
       const response = await api.MoveItem(id, parentId, sortOrder)
       await refreshVisibleTree(response.items, response.trashId)
       const copied = !sourceInTrash && sourceJournalId && targetJournalId && sourceJournalId !== targetJournalId
@@ -545,7 +576,6 @@ type EditorPaneProps = {
 
 function EditorPane({document, saveState, status, onDraft, onFlush, onRename, onEditorReady}: EditorPaneProps) {
   const [title, setTitle] = useState(document.title)
-  const draftTimer = useRef<number | undefined>(undefined)
 
   const editor = useEditor({
     extensions: editorExtensions,
@@ -559,14 +589,9 @@ function EditorPane({document, saveState, status, onDraft, onFlush, onRename, on
     onCreate: ({editor}) => onEditorReady(editor),
     onUpdate: ({editor}) => {
       const content = editor.getJSON() as ProseMirrorDoc
-      window.clearTimeout(draftTimer.current)
-      draftTimer.current = window.setTimeout(() => {
-        void onDraft(content)
-      }, 220)
+      void onDraft(content)
     },
   })
-
-  useEffect(() => () => window.clearTimeout(draftTimer.current), [])
 
   useEffect(() => {
     setTitle(document.title)
