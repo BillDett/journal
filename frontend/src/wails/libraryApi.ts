@@ -56,7 +56,14 @@ export type AppSettingsPatch = {
   autosaveIntervalMs: number
 }
 
+export type AppInfo = {
+  name: string
+  version: string
+  disclaimer: string
+}
+
 type BackendAPI = {
+  GetAppInfo: () => Promise<AppInfo>
   GetLibraryTree: () => Promise<TreeResponse>
   CreateDocument: (parentId: string) => Promise<DocumentResponse>
   CreateFolder: (parentId: string, title: string) => Promise<ItemResponse>
@@ -91,6 +98,11 @@ function missingBackend(): BackendAPI {
     throw new Error('Journal backend is unavailable. Run the app with Wails to use the local database.')
   }
   return {
+    GetAppInfo: async () => ({
+      name: 'Journal',
+      version: '0.0.0-dev',
+      disclaimer: 'Journal is free and open source software.',
+    }),
     GetLibraryTree: fail,
     CreateDocument: fail,
     CreateFolder: fail,

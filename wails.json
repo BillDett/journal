@@ -6,6 +6,12 @@
   "frontend:build": "npm run build",
   "frontend:dev:watcher": "npm run dev",
   "frontend:dev:serverUrl": "auto",
+  "info": {
+    "productName": "Journal",
+    "productVersion": "1.0.0",
+    "companyName": "Bill Dettelback",
+    "comments": "Journal is free and open source software."
+  },
   "author": {
     "name": "Bill Dettelback",
     "email": "bdettelb@redhat.com"

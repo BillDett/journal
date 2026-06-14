@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/wailsapp/wails/v2/pkg/runtime"
 	_ "modernc.org/sqlite"
 )
 
@@ -25,7 +26,13 @@ const (
 
 	defaultAutosaveIntervalMS = 2000
 	settingLastDocumentID     = "last_document_id"
+
+	defaultAppName    = "Journal"
+	defaultAppVersion = "0.0.0-dev"
+	appDisclaimer     = "Journal is free and open source software."
 )
+
+var appVersion = ""
 
 type App struct {
 	ctx     context.Context
@@ -116,6 +123,60 @@ func (a *App) GetAppSettings() (AppSettingsResponse, error) {
 
 func (a *App) UpdateAppSettings(settings AppSettingsPatch) (AppSettingsResponse, error) {
 	return a.service.UpdateAppSettings(settings)
+}
+
+func (a *App) GetAppInfo() AppInfo {
+	return appInfo()
+}
+
+func (a *App) ShowAbout() {
+	if a.ctx == nil {
+		return
+	}
+	runtime.EventsEmit(a.ctx, "journal:show-about")
+}
+
+type AppInfo struct {
+	Name       string `json:"name"`
+	Version    string `json:"version"`
+	Disclaimer string `json:"disclaimer"`
+}
+
+type wailsProjectInfo struct {
+	Name string `json:"name"`
+	Info struct {
+		ProductName    string `json:"productName"`
+		ProductVersion string `json:"productVersion"`
+		Comments       string `json:"comments"`
+	} `json:"info"`
+}
+
+func appInfo() AppInfo {
+	info := AppInfo{
+		Name:       defaultAppName,
+		Version:    defaultAppVersion,
+		Disclaimer: appDisclaimer,
+	}
+
+	var project wailsProjectInfo
+	if err := json.Unmarshal(wailsConfig, &project); err == nil {
+		if name := strings.TrimSpace(project.Info.ProductName); name != "" {
+			info.Name = name
+		} else if name := strings.TrimSpace(project.Name); name != "" {
+			info.Name = name
+		}
+		if version := strings.TrimSpace(project.Info.ProductVersion); version != "" {
+			info.Version = version
+		}
+		if disclaimer := strings.TrimSpace(project.Info.Comments); disclaimer != "" {
+			info.Disclaimer = disclaimer
+		}
+	}
+
+	if version := strings.TrimSpace(appVersion); version != "" {
+		info.Version = version
+	}
+	return info
 }
 
 type TreeItem struct {

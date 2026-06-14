@@ -98,6 +98,42 @@ On macOS, the packaged app is written to:
 build/bin/Journal.app
 ```
 
+## Versioning and Release Builds
+
+The application version is controlled in one place:
+
+```json
+"info": {
+  "productVersion": "1.0.0"
+}
+```
+
+Update `info.productVersion` in `wails.json` before making a release. Wails uses this value for the macOS bundle metadata and Windows executable metadata. The build scripts also pass the same value into the Go binary so the About window reports the release version.
+
+Build a release macOS app:
+
+```sh
+scripts/build-macos.sh
+```
+
+Build a release Windows executable:
+
+```sh
+scripts/build-windows.sh
+```
+
+Build a release Windows installer:
+
+```sh
+NSIS=1 scripts/build-windows.sh
+```
+
+Build both release targets:
+
+```sh
+scripts/build-release.sh
+```
+
 Build a Windows 64-bit executable:
 
 ```sh
@@ -121,7 +157,7 @@ wails build -platform windows/amd64 -nsis
 Build a standalone macOS app bundle for Apple Silicon Macs from the repository root:
 
 ```sh
-wails build -clean -platform darwin/arm64
+scripts/build-macos.sh
 ```
 
 This builds the React frontend, embeds it in the Go/Wails application, and writes the macOS app bundle to:

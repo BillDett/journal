@@ -32,10 +32,13 @@ import {editorExtensions} from './editor/extensions'
 import {
   api,
   messageFromError,
+  type AppInfo,
   type DocumentResponse,
   type ProseMirrorDoc,
   type TreeItem,
 } from './wails/libraryApi'
+import appIcon from './assets/appicon.png'
+import {EventsOn} from '../wailsjs/runtime/runtime'
 
 type SaveState = 'idle' | 'dirty' | 'saving' | 'saved' | 'error'
 
@@ -57,6 +60,12 @@ function App() {
   const [status, setStatus] = useState('Ready')
   const [lastError, setLastError] = useState('')
   const [settingsOpen, setSettingsOpen] = useState(false)
+  const [aboutOpen, setAboutOpen] = useState(false)
+  const [appInfo, setAppInfo] = useState<AppInfo>({
+    name: 'Journal',
+    version: '0.0.0-dev',
+    disclaimer: 'Journal is free and open source software.',
+  })
   const [autosaveInterval, setAutosaveInterval] = useState(2000)
   const [draggedId, setDraggedId] = useState('')
   const [deleteTarget, setDeleteTarget] = useState<DeleteTarget>(null)
@@ -90,13 +99,19 @@ function App() {
   useEffect(() => () => window.clearTimeout(autosaveTimer.current), [])
 
   useEffect(() => {
+    if (!('runtime' in window)) return undefined
+    return EventsOn('journal:show-about', () => setAboutOpen(true))
+  }, [])
+
+  useEffect(() => {
     let live = true
     async function boot() {
       try {
-        const [treeResponse, settings] = await Promise.all([api.GetLibraryTree(), api.GetAppSettings()])
+        const [treeResponse, settings, info] = await Promise.all([api.GetLibraryTree(), api.GetAppSettings(), api.GetAppInfo()])
         if (!live) return
         applyTree(treeResponse.items, treeResponse.trashId)
         setAutosaveInterval(settings.autosaveIntervalMs)
+        setAppInfo(info)
         if (settings.lastDocumentId) {
           try {
             const response = await api.OpenDocument(settings.lastDocumentId)
@@ -560,6 +575,8 @@ function App() {
               onConfirm={() => void confirmDelete()}
             />
           )}
+
+          {aboutOpen && <AboutDialog appInfo={appInfo} onClose={() => setAboutOpen(false)}/>}
         </section>
       </section>
     </main>
@@ -883,6 +900,28 @@ function DeleteDialog({target, onCancel, onConfirm}: {target: NonNullable<Delete
           <button type="button" onClick={onCancel}>Cancel</button>
           <button type="button" className={target.item.kind === 'journal' || target.inTrash ? 'danger-action' : ''} onClick={onConfirm}>{action}</button>
         </div>
+      </section>
+    </div>
+  )
+}
+
+function AboutDialog({appInfo, onClose}: {appInfo: AppInfo, onClose: () => void}) {
+  useEffect(() => {
+    function onKeyDown(event: KeyboardEvent) {
+      if (event.key === 'Escape') onClose()
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [onClose])
+
+  return (
+    <div className="dialog-backdrop" role="presentation" onMouseDown={onClose}>
+      <section className="about-dialog" role="dialog" aria-modal="true" aria-labelledby="about-title" onMouseDown={(event) => event.stopPropagation()}>
+        <button type="button" className="about-close" onClick={onClose} title="Close" aria-label="Close"><X size={14}/></button>
+        <img src={appIcon} alt="" className="about-icon"/>
+        <h2 id="about-title">{appInfo.name}</h2>
+        <p className="about-version">Version {appInfo.version}</p>
+        <p className="about-disclaimer">{appInfo.disclaimer}</p>
       </section>
     </div>
   )
