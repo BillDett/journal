@@ -21,6 +21,7 @@ Journal is a local desktop writing application that just lets you write and orga
 - Drag and drop into folders or back to the top level
 - Full-text search across folder titles, document titles, and saved document body text using SQLite FTS
 - Configurable autosave interval in the app UI
+- Strong encryption per-Journal, locked and unlocked via a single master password.
 
 ## Requirements
 

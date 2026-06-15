@@ -117,6 +117,36 @@ func (a *App) SearchLibrary(query string) (SearchResponse, error) {
 	return a.service.SearchLibrary(query)
 }
 
+func (a *App) GetEncryptionStatus() (EncryptionStatusResponse, error) {
+	return a.service.GetEncryptionStatus()
+}
+
+func (a *App) CreateMasterPassword(password string) error {
+	return a.service.CreateMasterPassword(password)
+}
+
+func (a *App) UnlockEncryption(password string) (EncryptionStatusResponse, error) {
+	if err := a.service.UnlockEncryption(password); err != nil {
+		return EncryptionStatusResponse{}, err
+	}
+	return a.service.GetEncryptionStatus()
+}
+
+func (a *App) ChangeMasterPassword(currentPassword string, newPassword string) (EncryptionStatusResponse, error) {
+	if err := a.service.ChangeMasterPassword(currentPassword, newPassword); err != nil {
+		return EncryptionStatusResponse{}, err
+	}
+	return a.service.GetEncryptionStatus()
+}
+
+func (a *App) EncryptJournal(journalID string) (TreeResponse, error) {
+	return a.service.EncryptJournal(journalID)
+}
+
+func (a *App) DecryptJournal(journalID string) (TreeResponse, error) {
+	return a.service.DecryptJournal(journalID)
+}
+
 func (a *App) GetAppSettings() (AppSettingsResponse, error) {
 	return a.service.GetAppSettings()
 }
@@ -180,17 +210,20 @@ func appInfo() AppInfo {
 }
 
 type TreeItem struct {
-	ID            string     `json:"id"`
-	ParentID      string     `json:"parentId"`
-	Kind          string     `json:"kind"`
-	Title         string     `json:"title"`
-	SortOrder     int        `json:"sortOrder"`
-	SystemKey     string     `json:"systemKey"`
-	CreatedAt     string     `json:"createdAt"`
-	UpdatedAt     string     `json:"updatedAt"`
-	DocumentCount int        `json:"documentCount"`
-	ItemCount     int        `json:"itemCount"`
-	Children      []TreeItem `json:"children"`
+	ID               string     `json:"id"`
+	ParentID         string     `json:"parentId"`
+	Kind             string     `json:"kind"`
+	Title            string     `json:"title"`
+	SortOrder        int        `json:"sortOrder"`
+	SystemKey        string     `json:"systemKey"`
+	CreatedAt        string     `json:"createdAt"`
+	UpdatedAt        string     `json:"updatedAt"`
+	EncryptionState  string     `json:"encryptionState"`
+	EncryptionKeyID  string     `json:"encryptionKeyId"`
+	EncryptionLocked bool       `json:"encryptionLocked"`
+	DocumentCount    int        `json:"documentCount"`
+	ItemCount        int        `json:"itemCount"`
+	Children         []TreeItem `json:"children"`
 }
 
 type TreeResponse struct {
@@ -246,14 +279,18 @@ type AppSettingsPatch struct {
 }
 
 type rowItem struct {
-	ID        string
-	ParentID  sql.NullString
-	Kind      string
-	Title     string
-	SortOrder int
-	SystemKey sql.NullString
-	CreatedAt string
-	UpdatedAt string
+	ID               string
+	ParentID         sql.NullString
+	Kind             string
+	Title            string
+	SortOrder        int
+	SystemKey        sql.NullString
+	CreatedAt        string
+	UpdatedAt        string
+	EncryptionState  string
+	EncryptionKeyID  sql.NullString
+	TitleCiphertext  []byte
+	EncryptionLocked bool
 }
 
 type pendingDraft struct {
@@ -265,8 +302,11 @@ type pendingDraft struct {
 type JournalService struct {
 	db               *sql.DB
 	mu               sync.Mutex
+	cryptoMu         sync.Mutex
 	pending          map[string]pendingDraft
 	lastDraftVersion map[string]int64
+	masterKey        []byte
+	journalKeys      map[string][]byte
 }
 
 func OpenJournalService(path string) (*JournalService, error) {
@@ -283,6 +323,7 @@ func OpenJournalService(path string) (*JournalService, error) {
 		db:               db,
 		pending:          map[string]pendingDraft{},
 		lastDraftVersion: map[string]int64{},
+		journalKeys:      map[string][]byte{},
 	}
 	if err := service.migrate(); err != nil {
 		_ = db.Close()
@@ -308,12 +349,16 @@ func (s *JournalService) migrate() error {
 			sort_order INTEGER NOT NULL DEFAULT 0,
 			system_key TEXT NULL UNIQUE,
 			created_at TEXT NOT NULL,
-			updated_at TEXT NOT NULL
+			updated_at TEXT NOT NULL,
+			encryption_state TEXT NOT NULL DEFAULT 'plaintext',
+			encryption_key_id TEXT NULL,
+			title_ciphertext BLOB NULL
 		)`,
 		`CREATE TABLE IF NOT EXISTS documents (
 			item_id TEXT PRIMARY KEY REFERENCES items(id) ON DELETE CASCADE,
 			schema_version INTEGER NOT NULL,
 			content_json TEXT NOT NULL,
+			content_ciphertext BLOB NULL,
 			created_at TEXT NOT NULL,
 			updated_at TEXT NOT NULL
 		)`,
@@ -328,6 +373,24 @@ func (s *JournalService) migrate() error {
 			value TEXT NOT NULL,
 			updated_at TEXT NOT NULL
 		)`,
+		`CREATE TABLE IF NOT EXISTS encryption_master (
+			id INTEGER PRIMARY KEY CHECK (id = 1),
+			kdf TEXT NOT NULL,
+			kdf_params_json TEXT NOT NULL,
+			salt BLOB NOT NULL,
+			verifier_nonce BLOB NOT NULL,
+			verifier_ciphertext BLOB NOT NULL,
+			created_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL
+		)`,
+		`CREATE TABLE IF NOT EXISTS journal_encryption_keys (
+			key_id TEXT PRIMARY KEY,
+			journal_id TEXT NOT NULL UNIQUE REFERENCES items(id) ON DELETE CASCADE,
+			wrapped_key_nonce BLOB NOT NULL,
+			wrapped_key_ciphertext BLOB NOT NULL,
+			created_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL
+		)`,
 		`CREATE INDEX IF NOT EXISTS idx_items_parent_sort ON items(parent_id, sort_order, title)`,
 	}
 	for _, statement := range statements {
@@ -336,6 +399,9 @@ func (s *JournalService) migrate() error {
 		}
 	}
 	if err := s.migrateItemsKindConstraint(); err != nil {
+		return err
+	}
+	if err := s.ensureEncryptionColumns(); err != nil {
 		return err
 	}
 	if err := s.ensureTrash(); err != nil {
@@ -405,17 +471,21 @@ func (s *JournalService) migrateItemsKindConstraint() error {
 			sort_order INTEGER NOT NULL DEFAULT 0,
 			system_key TEXT NULL UNIQUE,
 			created_at TEXT NOT NULL,
-			updated_at TEXT NOT NULL
+			updated_at TEXT NOT NULL,
+			encryption_state TEXT NOT NULL DEFAULT 'plaintext',
+			encryption_key_id TEXT NULL,
+			title_ciphertext BLOB NULL
 		)`,
 		`CREATE TABLE documents (
 			item_id TEXT PRIMARY KEY REFERENCES items(id) ON DELETE CASCADE,
 			schema_version INTEGER NOT NULL,
 			content_json TEXT NOT NULL,
+			content_ciphertext BLOB NULL,
 			created_at TEXT NOT NULL,
 			updated_at TEXT NOT NULL
 		)`,
-		`INSERT INTO items (id, parent_id, kind, title, sort_order, system_key, created_at, updated_at)
-		 SELECT id, parent_id, kind, title, sort_order, system_key, created_at, updated_at FROM items_legacy`,
+		`INSERT INTO items (id, parent_id, kind, title, sort_order, system_key, created_at, updated_at, encryption_state)
+		 SELECT id, parent_id, kind, title, sort_order, system_key, created_at, updated_at, 'plaintext' FROM items_legacy`,
 		`INSERT INTO documents (item_id, schema_version, content_json, created_at, updated_at)
 		 SELECT item_id, schema_version, content_json, created_at, updated_at FROM documents_legacy`,
 		`DROP TABLE documents_legacy`,
@@ -428,6 +498,55 @@ func (s *JournalService) migrateItemsKindConstraint() error {
 		}
 	}
 	return tx.Commit()
+}
+
+func (s *JournalService) ensureEncryptionColumns() error {
+	itemColumns, err := tableColumns(s.db, "items")
+	if err != nil {
+		return err
+	}
+	itemStatements := map[string]string{
+		"encryption_state":  `ALTER TABLE items ADD COLUMN encryption_state TEXT NOT NULL DEFAULT 'plaintext'`,
+		"encryption_key_id": `ALTER TABLE items ADD COLUMN encryption_key_id TEXT NULL`,
+		"title_ciphertext":  `ALTER TABLE items ADD COLUMN title_ciphertext BLOB NULL`,
+	}
+	for name, statement := range itemStatements {
+		if !itemColumns[name] {
+			if _, err := s.db.Exec(statement); err != nil {
+				return err
+			}
+		}
+	}
+	documentColumns, err := tableColumns(s.db, "documents")
+	if err != nil {
+		return err
+	}
+	if !documentColumns["content_ciphertext"] {
+		if _, err := s.db.Exec(`ALTER TABLE documents ADD COLUMN content_ciphertext BLOB NULL`); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func tableColumns(db queryer, table string) (map[string]bool, error) {
+	rows, err := db.Query(`PRAGMA table_info(` + table + `)`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	columns := map[string]bool{}
+	for rows.Next() {
+		var cid int
+		var name, columnType string
+		var notNull, pk int
+		var defaultValue any
+		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &pk); err != nil {
+			return nil, err
+		}
+		columns[name] = true
+	}
+	return columns, rows.Err()
 }
 
 func (s *JournalService) ensureDefaultJournal() error {
@@ -539,6 +658,31 @@ func (s *JournalService) CreateDocument(parentID string) (DocumentResponse, erro
 	if err != nil {
 		return DocumentResponse{}, err
 	}
+	_, keyID, key, encrypted, err := s.encryptionContextForParent(parentID)
+	if err != nil {
+		return DocumentResponse{}, err
+	}
+	title := "Untitled"
+	contentJSON := string(encoded)
+	var titleCiphertext []byte
+	var contentCiphertext []byte
+	encryptionState := EncryptionPlaintext
+	encryptionKeyID := sql.NullString{}
+	if encrypted {
+		encryptionState = EncryptionEncrypted
+		encryptionKeyID = sql.NullString{String: keyID, Valid: true}
+		titleCiphertext, err = sealField(key, "items", id, "title", keyID, []byte(title))
+		if err != nil {
+			return DocumentResponse{}, err
+		}
+		contentCiphertext, err = sealField(key, "documents", id, "content_json", keyID, encoded)
+		if err != nil {
+			return DocumentResponse{}, err
+		}
+		title = encryptedTitlePlaceholder(KindDocument)
+		placeholder, _ := json.Marshal(emptyDocument())
+		contentJSON = string(placeholder)
+	}
 
 	tx, err := s.db.Begin()
 	if err != nil {
@@ -547,16 +691,16 @@ func (s *JournalService) CreateDocument(parentID string) (DocumentResponse, erro
 	defer rollback(tx)
 
 	if _, err := tx.Exec(
-		`INSERT INTO items (id, parent_id, kind, title, sort_order, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		id, parentID, KindDocument, "Untitled", order, now, now,
+		`INSERT INTO items (id, parent_id, kind, title, sort_order, created_at, updated_at, encryption_state, encryption_key_id, title_ciphertext)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		id, parentID, KindDocument, title, order, now, now, encryptionState, encryptionKeyID, titleCiphertext,
 	); err != nil {
 		return DocumentResponse{}, err
 	}
 	if _, err := tx.Exec(
-		`INSERT INTO documents (item_id, schema_version, content_json, created_at, updated_at)
-		 VALUES (?, 1, ?, ?, ?)`,
-		id, string(encoded), now, now,
+		`INSERT INTO documents (item_id, schema_version, content_json, content_ciphertext, created_at, updated_at)
+		 VALUES (?, 1, ?, ?, ?, ?)`,
+		id, contentJSON, contentCiphertext, now, now,
 	); err != nil {
 		return DocumentResponse{}, err
 	}
@@ -581,6 +725,23 @@ func (s *JournalService) CreateFolder(parentID string, title string) (ItemRespon
 	if err != nil {
 		return ItemResponse{}, err
 	}
+	_, keyID, key, encrypted, err := s.encryptionContextForParent(parentID)
+	if err != nil {
+		return ItemResponse{}, err
+	}
+	storedTitle := title
+	var titleCiphertext []byte
+	encryptionState := EncryptionPlaintext
+	encryptionKeyID := sql.NullString{}
+	if encrypted {
+		encryptionState = EncryptionEncrypted
+		encryptionKeyID = sql.NullString{String: keyID, Valid: true}
+		titleCiphertext, err = sealField(key, "items", id, "title", keyID, []byte(title))
+		if err != nil {
+			return ItemResponse{}, err
+		}
+		storedTitle = encryptedTitlePlaceholder(KindFolder)
+	}
 
 	tx, err := s.db.Begin()
 	if err != nil {
@@ -588,9 +749,9 @@ func (s *JournalService) CreateFolder(parentID string, title string) (ItemRespon
 	}
 	defer rollback(tx)
 	if _, err := tx.Exec(
-		`INSERT INTO items (id, parent_id, kind, title, sort_order, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		id, parentID, KindFolder, title, order, now, now,
+		`INSERT INTO items (id, parent_id, kind, title, sort_order, created_at, updated_at, encryption_state, encryption_key_id, title_ciphertext)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		id, parentID, KindFolder, storedTitle, order, now, now, encryptionState, encryptionKeyID, titleCiphertext,
 	); err != nil {
 		return ItemResponse{}, err
 	}
@@ -644,7 +805,7 @@ func (s *JournalService) CreateJournal(title string) (ItemResponse, error) {
 
 func (s *JournalService) RenameItem(id string, title string) (ItemResponse, error) {
 	title = normalizeTitle(title, "Untitled")
-	item, err := s.getRowItem(id)
+	item, err := s.getRawRowItemFrom(s.db, id)
 	if err != nil {
 		return ItemResponse{}, err
 	}
@@ -658,8 +819,29 @@ func (s *JournalService) RenameItem(id string, title string) (ItemResponse, erro
 	}
 	defer rollback(tx)
 	now := nowString()
-	if _, err := tx.Exec(`UPDATE items SET title = ?, updated_at = ? WHERE id = ?`, title, now, id); err != nil {
-		return ItemResponse{}, err
+	if item.EncryptionState == EncryptionEncrypted && item.Kind != KindJournal {
+		journalID, err := s.journalIDForItem(id)
+		if err != nil {
+			return ItemResponse{}, err
+		}
+		key, ok := s.journalKey(journalID)
+		if !ok {
+			return ItemResponse{}, ErrEncryptionLocked
+		}
+		if !item.EncryptionKeyID.Valid {
+			return ItemResponse{}, fmt.Errorf("encrypted item key is missing")
+		}
+		titleCiphertext, err := sealField(key, "items", id, "title", item.EncryptionKeyID.String, []byte(title))
+		if err != nil {
+			return ItemResponse{}, err
+		}
+		if _, err := tx.Exec(`UPDATE items SET title = ?, title_ciphertext = ?, updated_at = ? WHERE id = ?`, encryptedTitlePlaceholder(item.Kind), titleCiphertext, now, id); err != nil {
+			return ItemResponse{}, err
+		}
+	} else {
+		if _, err := tx.Exec(`UPDATE items SET title = ?, updated_at = ? WHERE id = ?`, title, now, id); err != nil {
+			return ItemResponse{}, err
+		}
 	}
 	if err := s.syncFTSTx(tx, id); err != nil {
 		return ItemResponse{}, err
@@ -687,6 +869,23 @@ func (s *JournalService) MoveItem(id string, newParentID string, newSortOrder in
 	}
 	if err := s.validateMove(id, newParentID); err != nil {
 		return TreeResponse{}, err
+	}
+	trashID, err := s.trashID()
+	if err != nil {
+		return TreeResponse{}, err
+	}
+	if newParentID != trashID {
+		sourceKeyID, err := s.encryptionBoundaryKeyID(id)
+		if err != nil {
+			return TreeResponse{}, err
+		}
+		targetKeyID, err := s.encryptionBoundaryKeyID(newParentID)
+		if err != nil {
+			return TreeResponse{}, err
+		}
+		if sourceKeyID != targetKeyID {
+			return TreeResponse{}, fmt.Errorf("items cannot be moved between encrypted and plaintext journals")
+		}
 	}
 
 	sourceJournalID, err := s.journalIDForItem(id)
@@ -832,25 +1031,56 @@ func (s *JournalService) DeleteJournal(id string) (TreeResponse, error) {
 }
 
 func (s *JournalService) OpenDocument(id string) (DocumentResponse, error) {
-	item, err := s.getRowItem(id)
+	rawItem, err := s.getRawRowItemFrom(s.db, id)
 	if err != nil {
 		return DocumentResponse{}, err
 	}
-	if item.Kind != KindDocument {
+	if rawItem.Kind != KindDocument {
 		return DocumentResponse{}, fmt.Errorf("item is not a document")
 	}
 
 	var encoded string
 	var schemaVersion int
-	err = s.db.QueryRow(
-		`SELECT schema_version, content_json FROM documents WHERE item_id = ?`,
-		id,
-	).Scan(&schemaVersion, &encoded)
-	if err != nil {
-		return DocumentResponse{}, err
+	if rawItem.EncryptionState == EncryptionEncrypted {
+		journalID, err := s.journalIDForItem(id)
+		if err != nil {
+			return DocumentResponse{}, err
+		}
+		key, ok := s.journalKey(journalID)
+		if !ok {
+			return DocumentResponse{}, ErrEncryptionLocked
+		}
+		if !rawItem.EncryptionKeyID.Valid {
+			return DocumentResponse{}, fmt.Errorf("encrypted document key is missing")
+		}
+		var contentCiphertext []byte
+		err = s.db.QueryRow(
+			`SELECT schema_version, content_ciphertext FROM documents WHERE item_id = ?`,
+			id,
+		).Scan(&schemaVersion, &contentCiphertext)
+		if err != nil {
+			return DocumentResponse{}, err
+		}
+		plaintext, err := openField(key, "documents", id, "content_json", rawItem.EncryptionKeyID.String, contentCiphertext)
+		if err != nil {
+			return DocumentResponse{}, err
+		}
+		encoded = string(plaintext)
+	} else {
+		err = s.db.QueryRow(
+			`SELECT schema_version, content_json FROM documents WHERE item_id = ?`,
+			id,
+		).Scan(&schemaVersion, &encoded)
+		if err != nil {
+			return DocumentResponse{}, err
+		}
 	}
 	var content map[string]any
 	if err := json.Unmarshal([]byte(encoded), &content); err != nil {
+		return DocumentResponse{}, err
+	}
+	item, err := s.prepareItemForDisplay(rawItem)
+	if err != nil {
 		return DocumentResponse{}, err
 	}
 	tree, err := s.GetLibraryTree()
@@ -1061,17 +1291,51 @@ func (s *JournalService) saveDocumentContent(id string, content map[string]any) 
 	if err != nil {
 		return "", err
 	}
+	item, err := s.getRawRowItemFrom(s.db, id)
+	if err != nil {
+		return "", err
+	}
+	contentJSON := string(encoded)
+	var contentCiphertext []byte
+	if item.EncryptionState == EncryptionEncrypted {
+		journalID, err := s.journalIDForItem(id)
+		if err != nil {
+			return "", err
+		}
+		key, ok := s.journalKey(journalID)
+		if !ok {
+			return "", ErrEncryptionLocked
+		}
+		if !item.EncryptionKeyID.Valid {
+			return "", fmt.Errorf("encrypted document key is missing")
+		}
+		contentCiphertext, err = sealField(key, "documents", id, "content_json", item.EncryptionKeyID.String, encoded)
+		if err != nil {
+			return "", err
+		}
+		placeholder, _ := json.Marshal(emptyDocument())
+		contentJSON = string(placeholder)
+	}
 	now := nowString()
 	tx, err := s.db.Begin()
 	if err != nil {
 		return "", err
 	}
 	defer rollback(tx)
-	if _, err := tx.Exec(
-		`UPDATE documents SET content_json = ?, updated_at = ? WHERE item_id = ?`,
-		string(encoded), now, id,
-	); err != nil {
-		return "", err
+	if item.EncryptionState == EncryptionEncrypted {
+		if _, err := tx.Exec(
+			`UPDATE documents SET content_json = ?, content_ciphertext = ?, updated_at = ? WHERE item_id = ?`,
+			contentJSON, contentCiphertext, now, id,
+		); err != nil {
+			return "", err
+		}
+	} else {
+		if _, err := tx.Exec(
+			`UPDATE documents SET content_json = ?, content_ciphertext = NULL, updated_at = ? WHERE item_id = ?`,
+			contentJSON, now, id,
+		); err != nil {
+			return "", err
+		}
 	}
 	if _, err := tx.Exec(`UPDATE items SET updated_at = ? WHERE id = ?`, now, id); err != nil {
 		return "", err
@@ -1086,8 +1350,12 @@ func (s *JournalService) saveDocumentContent(id string, content map[string]any) 
 }
 
 func (s *JournalService) syncFTS(db dbRunner, id string) error {
-	item, err := s.getRowItemFrom(db, id)
+	item, err := s.getRawRowItemFrom(db, id)
 	if err != nil {
+		return err
+	}
+	if item.EncryptionState == EncryptionEncrypted {
+		_, err := db.Exec(`DELETE FROM library_search_fts WHERE item_id = ?`, id)
 		return err
 	}
 	body := ""
@@ -1196,7 +1464,8 @@ func (s *JournalService) validateMove(id string, newParentID string) error {
 
 func (s *JournalService) loadItems() ([]rowItem, error) {
 	rows, err := s.db.Query(
-		`SELECT id, parent_id, kind, title, sort_order, system_key, created_at, updated_at
+		`SELECT id, parent_id, kind, title, sort_order, system_key, created_at, updated_at,
+		        encryption_state, encryption_key_id, title_ciphertext
 		 FROM items
 		 ORDER BY parent_id IS NOT NULL, parent_id, sort_order, title COLLATE NOCASE`,
 	)
@@ -1207,12 +1476,15 @@ func (s *JournalService) loadItems() ([]rowItem, error) {
 	var items []rowItem
 	for rows.Next() {
 		var item rowItem
-		if err := rows.Scan(&item.ID, &item.ParentID, &item.Kind, &item.Title, &item.SortOrder, &item.SystemKey, &item.CreatedAt, &item.UpdatedAt); err != nil {
+		if err := rows.Scan(&item.ID, &item.ParentID, &item.Kind, &item.Title, &item.SortOrder, &item.SystemKey, &item.CreatedAt, &item.UpdatedAt, &item.EncryptionState, &item.EncryptionKeyID, &item.TitleCiphertext); err != nil {
 			return nil, err
 		}
 		items = append(items, item)
 	}
-	return items, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return s.prepareItemsForDisplay(items)
 }
 
 func (s *JournalService) getRowItem(id string) (rowItem, error) {
@@ -1220,12 +1492,21 @@ func (s *JournalService) getRowItem(id string) (rowItem, error) {
 }
 
 func (s *JournalService) getRowItemFrom(db queryRower, id string) (rowItem, error) {
+	item, err := s.getRawRowItemFrom(db, id)
+	if err != nil {
+		return rowItem{}, err
+	}
+	return s.prepareItemForDisplay(item)
+}
+
+func (s *JournalService) getRawRowItemFrom(db queryRower, id string) (rowItem, error) {
 	var item rowItem
 	err := db.QueryRow(
-		`SELECT id, parent_id, kind, title, sort_order, system_key, created_at, updated_at
+		`SELECT id, parent_id, kind, title, sort_order, system_key, created_at, updated_at,
+		        encryption_state, encryption_key_id, title_ciphertext
 		 FROM items WHERE id = ?`,
 		id,
-	).Scan(&item.ID, &item.ParentID, &item.Kind, &item.Title, &item.SortOrder, &item.SystemKey, &item.CreatedAt, &item.UpdatedAt)
+	).Scan(&item.ID, &item.ParentID, &item.Kind, &item.Title, &item.SortOrder, &item.SystemKey, &item.CreatedAt, &item.UpdatedAt, &item.EncryptionState, &item.EncryptionKeyID, &item.TitleCiphertext)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return rowItem{}, fmt.Errorf("item not found")
@@ -1233,6 +1514,99 @@ func (s *JournalService) getRowItemFrom(db queryRower, id string) (rowItem, erro
 		return rowItem{}, err
 	}
 	return item, nil
+}
+
+func (s *JournalService) prepareItemsForDisplay(items []rowItem) ([]rowItem, error) {
+	byID := map[string]rowItem{}
+	for _, item := range items {
+		byID[item.ID] = item
+	}
+	lockedRoots := map[string]bool{}
+	for _, item := range items {
+		if item.Kind == KindJournal && item.EncryptionState == EncryptionEncrypted {
+			if _, ok := s.journalKey(item.ID); !ok {
+				lockedRoots[item.ID] = true
+			}
+		}
+	}
+	display := make([]rowItem, 0, len(items))
+	for _, item := range items {
+		rootID := rootJournalIDForRows(byID, item.ID)
+		if item.Kind == KindJournal && item.EncryptionState == EncryptionEncrypted {
+			item.EncryptionLocked = lockedRoots[item.ID]
+		}
+		if item.Kind != KindJournal && item.EncryptionState == EncryptionEncrypted {
+			if lockedRoots[rootID] {
+				continue
+			}
+		}
+		prepared, err := s.prepareItemForDisplayWithRoot(item, rootID)
+		if err != nil {
+			return nil, err
+		}
+		display = append(display, prepared)
+	}
+	return display, nil
+}
+
+func (s *JournalService) prepareItemForDisplay(item rowItem) (rowItem, error) {
+	if item.EncryptionState != EncryptionEncrypted {
+		if item.EncryptionState == "" {
+			item.EncryptionState = EncryptionPlaintext
+		}
+		return item, nil
+	}
+	rootID, err := s.journalIDForItem(item.ID)
+	if err != nil {
+		return rowItem{}, err
+	}
+	return s.prepareItemForDisplayWithRoot(item, rootID)
+}
+
+func (s *JournalService) prepareItemForDisplayWithRoot(item rowItem, rootID string) (rowItem, error) {
+	if item.EncryptionState == "" {
+		item.EncryptionState = EncryptionPlaintext
+	}
+	if item.EncryptionState != EncryptionEncrypted {
+		return item, nil
+	}
+	if item.Kind == KindJournal {
+		if _, ok := s.journalKey(item.ID); !ok {
+			item.EncryptionLocked = true
+		}
+		return item, nil
+	}
+	key, ok := s.journalKey(rootID)
+	if !ok {
+		item.EncryptionLocked = true
+		return item, nil
+	}
+	if !item.EncryptionKeyID.Valid || len(item.TitleCiphertext) == 0 {
+		return rowItem{}, fmt.Errorf("encrypted item title is missing")
+	}
+	plaintext, err := openField(key, "items", item.ID, "title", item.EncryptionKeyID.String, item.TitleCiphertext)
+	if err != nil {
+		return rowItem{}, err
+	}
+	item.Title = string(plaintext)
+	return item, nil
+}
+
+func rootJournalIDForRows(items map[string]rowItem, id string) string {
+	for id != "" {
+		item, ok := items[id]
+		if !ok {
+			return ""
+		}
+		if item.Kind == KindJournal {
+			return item.ID
+		}
+		if !item.ParentID.Valid {
+			return ""
+		}
+		id = item.ParentID.String
+	}
+	return ""
 }
 
 func (s *JournalService) getTreeItem(id string) (TreeItem, error) {
@@ -1261,7 +1635,7 @@ func (s *JournalService) isInTrash(id string) (bool, error) {
 		if id == trashID {
 			return true, nil
 		}
-		item, err := s.getRowItem(id)
+		item, err := s.getRawRowItemFrom(s.db, id)
 		if err != nil {
 			return false, err
 		}
@@ -1399,16 +1773,27 @@ func treeItemFromRow(item rowItem) TreeItem {
 	if item.SystemKey.Valid {
 		systemKey = item.SystemKey.String
 	}
+	encryptionKeyID := ""
+	if item.EncryptionKeyID.Valid {
+		encryptionKeyID = item.EncryptionKeyID.String
+	}
+	encryptionState := item.EncryptionState
+	if encryptionState == "" {
+		encryptionState = EncryptionPlaintext
+	}
 	return TreeItem{
-		ID:        item.ID,
-		ParentID:  parentID,
-		Kind:      item.Kind,
-		Title:     item.Title,
-		SortOrder: item.SortOrder,
-		SystemKey: systemKey,
-		CreatedAt: item.CreatedAt,
-		UpdatedAt: item.UpdatedAt,
-		Children:  []TreeItem{},
+		ID:               item.ID,
+		ParentID:         parentID,
+		Kind:             item.Kind,
+		Title:            item.Title,
+		SortOrder:        item.SortOrder,
+		SystemKey:        systemKey,
+		CreatedAt:        item.CreatedAt,
+		UpdatedAt:        item.UpdatedAt,
+		EncryptionState:  encryptionState,
+		EncryptionKeyID:  encryptionKeyID,
+		EncryptionLocked: item.EncryptionLocked,
+		Children:         []TreeItem{},
 	}
 }
 
@@ -1578,7 +1963,7 @@ func (s *JournalService) journalIDForItem(id string) (string, error) {
 		return "", nil
 	}
 	for id != "" {
-		item, err := s.getRowItem(id)
+		item, err := s.getRawRowItemFrom(s.db, id)
 		if err != nil {
 			return "", err
 		}

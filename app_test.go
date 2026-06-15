@@ -8,6 +8,9 @@ import (
 
 func newTestService(t *testing.T) *JournalService {
 	t.Helper()
+	masterKDFN = 1024
+	masterKDFR = 8
+	masterKDFP = 1
 	service, err := OpenJournalService(filepath.Join(t.TempDir(), "journal.db"))
 	if err != nil {
 		t.Fatalf("open service: %v", err)
@@ -528,6 +531,199 @@ func TestMoveFolderToTrashKeepsDescendants(t *testing.T) {
 	movedFolder := trash.Children[0]
 	if movedFolder.ID != folder.Item.ID || len(movedFolder.Children) != 1 || movedFolder.Children[0].ID != doc.ID {
 		t.Fatalf("expected descendant document to remain under moved folder, got %#v", movedFolder)
+	}
+}
+
+func TestEncryptJournalHidesContentFromPlaintextColumnsAndSearch(t *testing.T) {
+	service := newTestService(t)
+
+	tree, err := service.GetLibraryTree()
+	if err != nil {
+		t.Fatalf("tree: %v", err)
+	}
+	journal := tree.Items[0]
+	folder, err := service.CreateFolder(journal.ID, "Private Folder")
+	if err != nil {
+		t.Fatalf("create folder: %v", err)
+	}
+	doc, err := service.CreateDocument(folder.Item.ID)
+	if err != nil {
+		t.Fatalf("create document: %v", err)
+	}
+	if _, err := service.RenameItem(doc.ID, "Secret Plan"); err != nil {
+		t.Fatalf("rename doc: %v", err)
+	}
+	if _, err := service.UpdateDocumentDraft(doc.ID, proseMirrorDoc("buried treasure"), 1); err != nil {
+		t.Fatalf("draft: %v", err)
+	}
+	if _, err := service.FlushDocument(doc.ID); err != nil {
+		t.Fatalf("flush: %v", err)
+	}
+	if results, err := service.SearchLibrary("treasure"); err != nil {
+		t.Fatalf("search before encrypt: %v", err)
+	} else if len(results.ResultIDs) != 1 {
+		t.Fatalf("expected plaintext search hit before encryption, got %#v", results.ResultIDs)
+	}
+	if _, err := service.EncryptJournal(journal.ID); err == nil {
+		t.Fatal("expected encryption to require a master password")
+	}
+	if err := service.CreateMasterPassword("correct horse battery staple"); err != nil {
+		t.Fatalf("create master password: %v", err)
+	}
+	encryptedTree, err := service.EncryptJournal(journal.ID)
+	if err != nil {
+		t.Fatalf("encrypt journal: %v", err)
+	}
+	encryptedJournal := findTreeItem(encryptedTree.Items, journal.ID)
+	if encryptedJournal == nil || encryptedJournal.EncryptionState != EncryptionEncrypted || encryptedJournal.EncryptionLocked {
+		t.Fatalf("expected unlocked encrypted journal, got %#v", encryptedJournal)
+	}
+
+	var storedTitle string
+	var storedContent string
+	if err := service.db.QueryRow(`SELECT title FROM items WHERE id = ?`, doc.ID).Scan(&storedTitle); err != nil {
+		t.Fatalf("stored title: %v", err)
+	}
+	if storedTitle == "Secret Plan" {
+		t.Fatal("expected document title to be encrypted in storage")
+	}
+	if err := service.db.QueryRow(`SELECT content_json FROM documents WHERE item_id = ?`, doc.ID).Scan(&storedContent); err != nil {
+		t.Fatalf("stored content: %v", err)
+	}
+	if storedContent == "" || storedContent == `{"type":"doc","content":[{"type":"paragraph","content":[{"type":"text","text":"buried treasure"}]}]}` {
+		t.Fatalf("expected document content_json to be replaced with a placeholder, got %q", storedContent)
+	}
+
+	results, err := service.SearchLibrary("treasure")
+	if err != nil {
+		t.Fatalf("search after encrypt: %v", err)
+	}
+	if len(results.ResultIDs) != 0 {
+		t.Fatalf("expected encrypted content to be excluded from search, got %#v", results.ResultIDs)
+	}
+	opened, err := service.OpenDocument(doc.ID)
+	if err != nil {
+		t.Fatalf("open encrypted document while unlocked: %v", err)
+	}
+	if opened.Title != "Secret Plan" || extractText(opened.Content) != "buried treasure" {
+		t.Fatalf("expected decrypted document, got title=%q text=%q", opened.Title, extractText(opened.Content))
+	}
+}
+
+func TestUnlockAndChangeMasterPasswordRelocksEncryptedJournals(t *testing.T) {
+	service := newTestService(t)
+
+	tree, err := service.GetLibraryTree()
+	if err != nil {
+		t.Fatalf("tree: %v", err)
+	}
+	journal := tree.Items[0]
+	doc, err := service.CreateDocument(journal.ID)
+	if err != nil {
+		t.Fatalf("create doc: %v", err)
+	}
+	if _, err := service.UpdateDocumentDraft(doc.ID, proseMirrorDoc("locked text"), 1); err != nil {
+		t.Fatalf("draft: %v", err)
+	}
+	if _, err := service.FlushDocument(doc.ID); err != nil {
+		t.Fatalf("flush: %v", err)
+	}
+	if err := service.CreateMasterPassword("old password"); err != nil {
+		t.Fatalf("create master password: %v", err)
+	}
+	if _, err := service.EncryptJournal(journal.ID); err != nil {
+		t.Fatalf("encrypt journal: %v", err)
+	}
+	if err := service.ChangeMasterPassword("old password", "new password"); err != nil {
+		t.Fatalf("change password: %v", err)
+	}
+	status, err := service.GetEncryptionStatus()
+	if err != nil {
+		t.Fatalf("status: %v", err)
+	}
+	if status.Unlocked {
+		t.Fatal("expected password change to relock encrypted journals")
+	}
+	lockedTree, err := service.GetLibraryTree()
+	if err != nil {
+		t.Fatalf("locked tree: %v", err)
+	}
+	lockedJournal := findTreeItem(lockedTree.Items, journal.ID)
+	if lockedJournal == nil || !lockedJournal.EncryptionLocked || len(lockedJournal.Children) != 0 {
+		t.Fatalf("expected locked journal with hidden children, got %#v", lockedJournal)
+	}
+	if _, err := service.OpenDocument(doc.ID); err == nil {
+		t.Fatal("expected opening encrypted document to require unlock")
+	}
+	if err := service.UnlockEncryption("old password"); err == nil {
+		t.Fatal("expected old password to fail after password change")
+	}
+	if err := service.UnlockEncryption("new password"); err != nil {
+		t.Fatalf("unlock with new password: %v", err)
+	}
+	opened, err := service.OpenDocument(doc.ID)
+	if err != nil {
+		t.Fatalf("open after unlock: %v", err)
+	}
+	if text := extractText(opened.Content); text != "locked text" {
+		t.Fatalf("expected decrypted text after unlock, got %q", text)
+	}
+}
+
+func TestDecryptJournalRestoresPlaintextSearchAndBlocksBoundaryMoves(t *testing.T) {
+	service := newTestService(t)
+
+	tree, err := service.GetLibraryTree()
+	if err != nil {
+		t.Fatalf("tree: %v", err)
+	}
+	journal := tree.Items[0]
+	other, err := service.CreateJournal("Plain")
+	if err != nil {
+		t.Fatalf("create other journal: %v", err)
+	}
+	doc, err := service.CreateDocument(journal.ID)
+	if err != nil {
+		t.Fatalf("create doc: %v", err)
+	}
+	if _, err := service.RenameItem(doc.ID, "Move Me"); err != nil {
+		t.Fatalf("rename doc: %v", err)
+	}
+	if _, err := service.UpdateDocumentDraft(doc.ID, proseMirrorDoc("searchable again"), 1); err != nil {
+		t.Fatalf("draft: %v", err)
+	}
+	if _, err := service.FlushDocument(doc.ID); err != nil {
+		t.Fatalf("flush: %v", err)
+	}
+	if err := service.CreateMasterPassword("password"); err != nil {
+		t.Fatalf("create master password: %v", err)
+	}
+	if _, err := service.EncryptJournal(journal.ID); err != nil {
+		t.Fatalf("encrypt journal: %v", err)
+	}
+	if _, err := service.MoveItem(doc.ID, other.Item.ID, -1); err == nil {
+		t.Fatal("expected moving encrypted item into plaintext journal to fail")
+	}
+	decryptedTree, err := service.DecryptJournal(journal.ID)
+	if err != nil {
+		t.Fatalf("decrypt journal: %v", err)
+	}
+	if findTreeItem(decryptedTree.Items, journal.ID) != nil {
+		t.Fatal("expected encrypted source journal id to be replaced")
+	}
+	results, err := service.SearchLibrary("searchable")
+	if err != nil {
+		t.Fatalf("search after decrypt: %v", err)
+	}
+	if len(results.ResultIDs) != 1 {
+		t.Fatalf("expected decrypted content to be searchable, got %#v", results.ResultIDs)
+	}
+	opened, err := service.OpenDocument(results.ResultIDs[0])
+	if err != nil {
+		t.Fatalf("open decrypted copy: %v", err)
+	}
+	if opened.Title != "Move Me" || extractText(opened.Content) != "searchable again" {
+		t.Fatalf("expected plaintext replacement document, got title=%q text=%q", opened.Title, extractText(opened.Content))
 	}
 }
 

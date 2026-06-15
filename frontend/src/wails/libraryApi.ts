@@ -13,6 +13,9 @@ export type TreeItem = {
   systemKey: string
   createdAt: string
   updatedAt: string
+  encryptionState: 'plaintext' | 'encrypted'
+  encryptionKeyId: string
+  encryptionLocked: boolean
   documentCount: number
   itemCount: number
   children: TreeItem[]
@@ -62,6 +65,12 @@ export type AppInfo = {
   disclaimer: string
 }
 
+export type EncryptionStatusResponse = {
+  masterPasswordConfigured: boolean
+  unlocked: boolean
+  encryptedJournalIds: string[]
+}
+
 type BackendAPI = {
   GetAppInfo: () => Promise<AppInfo>
   GetLibraryTree: () => Promise<TreeResponse>
@@ -77,6 +86,12 @@ type BackendAPI = {
   UpdateDocumentDraft: (id: string, content: ProseMirrorDoc, version: number) => Promise<{id: string, saveState: string, version: number}>
   FlushDocument: (id: string) => Promise<{id: string, saveState: string, savedAt: string, updatedAt: string, version: number}>
   SearchLibrary: (query: string) => Promise<SearchResponse>
+  GetEncryptionStatus: () => Promise<EncryptionStatusResponse>
+  CreateMasterPassword: (password: string) => Promise<void>
+  UnlockEncryption: (password: string) => Promise<EncryptionStatusResponse>
+  ChangeMasterPassword: (currentPassword: string, newPassword: string) => Promise<EncryptionStatusResponse>
+  EncryptJournal: (journalId: string) => Promise<TreeResponse>
+  DecryptJournal: (journalId: string) => Promise<TreeResponse>
   GetAppSettings: () => Promise<AppSettingsResponse>
   UpdateAppSettings: (settings: AppSettingsPatch) => Promise<AppSettingsResponse>
 }
@@ -116,6 +131,12 @@ function missingBackend(): BackendAPI {
     UpdateDocumentDraft: fail,
     FlushDocument: fail,
     SearchLibrary: fail,
+    GetEncryptionStatus: fail,
+    CreateMasterPassword: fail,
+    UnlockEncryption: fail,
+    ChangeMasterPassword: fail,
+    EncryptJournal: fail,
+    DecryptJournal: fail,
     GetAppSettings: fail,
     UpdateAppSettings: fail,
   }

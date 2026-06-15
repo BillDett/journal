@@ -14,8 +14,10 @@ import {
   FolderPlus,
   Highlighter,
   Italic,
+  KeyRound,
   List,
   ListOrdered,
+  Lock,
   Plus,
   Redo2,
   Search,
@@ -26,6 +28,7 @@ import {
   Type,
   Underline as UnderlineIcon,
   Undo2,
+  Unlock,
   X,
 } from 'lucide-react'
 import {editorExtensions} from './editor/extensions'
@@ -34,6 +37,7 @@ import {
   messageFromError,
   type AppInfo,
   type DocumentResponse,
+  type EncryptionStatusResponse,
   type ProseMirrorDoc,
   type TreeItem,
 } from './wails/libraryApi'
@@ -46,6 +50,14 @@ type DeleteTarget = {
   item: TreeItem
   inTrash: boolean
 } | null
+
+type DecryptTarget = TreeItem | null
+
+type EncryptionDialogState =
+  | {mode: 'create', journalId: string}
+  | {mode: 'unlock', journalId?: string, action?: 'encrypt' | 'decrypt' | 'open'}
+  | {mode: 'change'}
+  | null
 
 function App() {
   const [tree, setTree] = useState<TreeItem[]>([])
@@ -69,6 +81,14 @@ function App() {
   const [autosaveInterval, setAutosaveInterval] = useState(2000)
   const [draggedId, setDraggedId] = useState('')
   const [deleteTarget, setDeleteTarget] = useState<DeleteTarget>(null)
+  const [decryptTarget, setDecryptTarget] = useState<DecryptTarget>(null)
+  const [encryptedNotice, setEncryptedNotice] = useState('')
+  const [encryptionDialog, setEncryptionDialog] = useState<EncryptionDialogState>(null)
+  const [encryptionStatus, setEncryptionStatus] = useState<EncryptionStatusResponse>({
+    masterPasswordConfigured: false,
+    unlocked: false,
+    encryptedJournalIds: [],
+  })
   const [libraryWidth, setLibraryWidth] = useState(300)
   const autosaveTimer = useRef<number | undefined>(undefined)
   const latestDraft = useRef<{id: string, content: ProseMirrorDoc, version: number} | null>(null)
@@ -99,6 +119,14 @@ function App() {
   useEffect(() => () => window.clearTimeout(autosaveTimer.current), [])
 
   useEffect(() => {
+    if (!lastError.toLowerCase().includes('invalid master password')) return undefined
+    const handle = window.setTimeout(() => {
+      setLastError((current) => current === lastError ? '' : current)
+    }, 5000)
+    return () => window.clearTimeout(handle)
+  }, [lastError])
+
+  useEffect(() => {
     if (!('runtime' in window)) return undefined
     return EventsOn('journal:show-about', () => setAboutOpen(true))
   }, [])
@@ -107,11 +135,12 @@ function App() {
     let live = true
     async function boot() {
       try {
-        const [treeResponse, settings, info] = await Promise.all([api.GetLibraryTree(), api.GetAppSettings(), api.GetAppInfo()])
+        const [treeResponse, settings, info, encryption] = await Promise.all([api.GetLibraryTree(), api.GetAppSettings(), api.GetAppInfo(), api.GetEncryptionStatus()])
         if (!live) return
         applyTree(treeResponse.items, treeResponse.trashId)
         setAutosaveInterval(settings.autosaveIntervalMs)
         setAppInfo(info)
+        setEncryptionStatus(encryption)
         if (settings.lastDocumentId) {
           try {
             const response = await api.OpenDocument(settings.lastDocumentId)
@@ -391,6 +420,142 @@ function App() {
     }
   }
 
+  async function refreshEncryptionStatus() {
+    const response = await api.GetEncryptionStatus()
+    setEncryptionStatus(response)
+    return response
+  }
+
+  async function openEncryptedJournal(journalId: string) {
+    if (!encryptionStatus.unlocked) {
+      setSelectedItemId(journalId)
+      setEncryptionDialog({mode: 'unlock', journalId, action: 'open'})
+      return
+    }
+    setExpanded((current) => new Set([...current, journalId]))
+  }
+
+  async function encryptJournal(journalId: string) {
+    if (!(await flushActive())) return
+    if (!encryptionStatus.masterPasswordConfigured) {
+      setEncryptionDialog({mode: 'create', journalId})
+      return
+    }
+    if (!encryptionStatus.unlocked) {
+      setEncryptionDialog({mode: 'unlock', journalId, action: 'encrypt'})
+      return
+    }
+    try {
+      const response = await api.EncryptJournal(journalId)
+      await refreshEncryptionStatus()
+      await refreshVisibleTree(response.items, response.trashId)
+      setExpanded((current) => new Set([...current, journalId]))
+      setStatus('Encrypted journal')
+      setEncryptedNotice(encryptedJournalTitle(response.items, journalId))
+    } catch (error) {
+      setLastError(messageFromError(error))
+    }
+  }
+
+  async function decryptJournal(journalId: string) {
+    if (!encryptionStatus.unlocked) {
+      setEncryptionDialog({mode: 'unlock', journalId, action: 'decrypt'})
+      return
+    }
+    const item = flattened.find((entry) => entry.id === journalId)
+    if (item) {
+      setDecryptTarget(item)
+      return
+    }
+    await performDecryptJournal(journalId)
+  }
+
+  async function performDecryptJournal(journalId: string) {
+    const closesActive = activeDoc ? journalIdFor(flattened, activeDoc.id) === journalId : false
+    if (!(await flushActive())) return
+    try {
+      const response = await api.DecryptJournal(journalId)
+      await refreshEncryptionStatus()
+      await refreshVisibleTree(response.items, response.trashId)
+      if (closesActive) {
+        clearActiveDocument()
+      }
+      setStatus('Turned off encryption')
+    } catch (error) {
+      setLastError(messageFromError(error))
+    }
+  }
+
+  async function continueEncryptionAction(dialog: NonNullable<EncryptionDialogState>) {
+    if (dialog.mode === 'unlock' && dialog.journalId) {
+      if (dialog.action === 'encrypt') {
+        const response = await api.EncryptJournal(dialog.journalId)
+        await refreshEncryptionStatus()
+        await refreshVisibleTree(response.items, response.trashId)
+        setExpanded((current) => new Set([...current, dialog.journalId ?? '']))
+        setStatus('Encrypted journal')
+        setEncryptedNotice(encryptedJournalTitle(response.items, dialog.journalId))
+      } else if (dialog.action === 'decrypt') {
+        const item = flattened.find((entry) => entry.id === dialog.journalId)
+        if (item) setDecryptTarget(item)
+      } else if (dialog.action === 'open') {
+        await loadTree()
+        setExpanded((current) => new Set([...current, dialog.journalId ?? '']))
+      }
+    }
+  }
+
+  async function submitMasterPassword(password: string) {
+    const dialog = encryptionDialog
+    if (!dialog) return
+    try {
+      if (dialog.mode === 'create') {
+        await api.CreateMasterPassword(password)
+        await refreshEncryptionStatus()
+        setEncryptionDialog(null)
+        const response = await api.EncryptJournal(dialog.journalId)
+        await refreshEncryptionStatus()
+        await refreshVisibleTree(response.items, response.trashId)
+        setExpanded((current) => new Set([...current, dialog.journalId]))
+        setStatus('Encrypted journal')
+        setEncryptedNotice(encryptedJournalTitle(response.items, dialog.journalId))
+      } else if (dialog.mode === 'unlock') {
+        const status = await api.UnlockEncryption(password)
+        setEncryptionStatus(status)
+        setEncryptionDialog(null)
+        await continueEncryptionAction(dialog)
+      }
+    } catch (error) {
+      setLastError(messageFromError(error))
+    }
+  }
+
+  async function submitMasterPasswordChange(currentPassword: string, newPassword: string) {
+    if (!(await flushActive())) return
+    const activeWasEncrypted = activeDoc ? encryptedJournalIds(flattened).has(journalIdFor(flattened, activeDoc.id)) : false
+    try {
+      const status = await api.ChangeMasterPassword(currentPassword, newPassword)
+      setEncryptionStatus(status)
+      setEncryptionDialog(null)
+      await loadTree()
+      if (activeWasEncrypted) {
+        clearActiveDocument()
+      }
+      setStatus('Master password changed')
+    } catch (error) {
+      setLastError(messageFromError(error))
+    }
+  }
+
+  function clearActiveDocument() {
+    latestDraft.current = null
+    activeDocId.current = ''
+    setActiveDoc(null)
+    setSelectedItemId('')
+    setSaveState('idle')
+    setStatus('Ready')
+  }
+
   async function updateAutosaveInterval(value: number) {
     setAutosaveInterval(value)
     try {
@@ -496,6 +661,9 @@ function App() {
                   onDelete={requestDelete}
                   onCreateDocument={(id) => void createDocument(id)}
                   onCreateFolder={(id) => void createFolder(id)}
+                  onEncryptJournal={(id) => void encryptJournal(id)}
+                  onDecryptJournal={(id) => void decryptJournal(id)}
+                  onOpenEncryptedJournal={(id) => void openEncryptedJournal(id)}
                   onDragStart={setDraggedId}
                   onDrop={(id, parentId, sortOrder) => void moveItem(id, parentId, sortOrder)}
                 />
@@ -534,6 +702,9 @@ function App() {
                 />
                 <span>ms</span>
               </label>
+              {encryptionStatus.masterPasswordConfigured && (
+                <button type="button" onClick={() => setEncryptionDialog({mode: 'change'})}><KeyRound size={14}/>Change master password</button>
+              )}
             </div>
           )}
 
@@ -573,6 +744,34 @@ function App() {
               target={deleteTarget}
               onCancel={() => setDeleteTarget(null)}
               onConfirm={() => void confirmDelete()}
+            />
+          )}
+
+          {decryptTarget && (
+            <DecryptDialog
+              target={decryptTarget}
+              onCancel={() => setDecryptTarget(null)}
+              onConfirm={() => {
+                const id = decryptTarget.id
+                setDecryptTarget(null)
+                void performDecryptJournal(id)
+              }}
+            />
+          )}
+
+          {encryptedNotice && (
+            <EncryptedNoticeDialog
+              journalTitle={encryptedNotice}
+              onClose={() => setEncryptedNotice('')}
+            />
+          )}
+
+          {encryptionDialog && (
+            <EncryptionDialog
+              state={encryptionDialog}
+              onCancel={() => setEncryptionDialog(null)}
+              onSubmitPassword={(password) => void submitMasterPassword(password)}
+              onChangePassword={(currentPassword, newPassword) => void submitMasterPasswordChange(currentPassword, newPassword)}
             />
           )}
 
@@ -774,6 +973,9 @@ type TreeNodeProps = {
   onDelete: (id: string) => void
   onCreateDocument: (id: string) => void
   onCreateFolder: (id: string) => void
+  onEncryptJournal: (id: string) => void
+  onDecryptJournal: (id: string) => void
+  onOpenEncryptedJournal: (id: string) => void
   onDragStart: (id: string) => void
   onDrop: (id: string, parentId: string, sortOrder: number) => void
 }
@@ -785,6 +987,8 @@ function TreeNode(props: TreeNodeProps) {
   const isContainer = isJournal || isFolder
   const isExpanded = expanded.has(item.id)
   const isTrash = item.id === trashId
+  const isEncryptedJournal = isJournal && item.encryptionState === 'encrypted'
+  const isLockedJournal = isEncryptedJournal && item.encryptionLocked
   const deleteDisabled = isJournal && journalCount <= 1
   const isMatch = searchResults.has(item.id)
   const [draftTitle, setDraftTitle] = useState(item.title)
@@ -802,6 +1006,8 @@ function TreeNode(props: TreeNodeProps) {
           selectedId === item.id ? 'selected' : '',
           isMatch ? 'match' : '',
           invalidDrop ? 'reject-drop' : '',
+          isEncryptedJournal ? 'encrypted' : '',
+          isLockedJournal ? 'locked' : '',
         ].filter(Boolean).join(' ')}
         style={{paddingLeft: 10 + level * 16}}
         role="treeitem"
@@ -820,7 +1026,8 @@ function TreeNode(props: TreeNodeProps) {
         }}
         onKeyDown={(event) => {
           props.onSelect(item.id)
-          if (event.key === 'Enter' && item.kind === 'document') props.onOpen(item.id)
+          if (event.key === 'Enter' && isLockedJournal) props.onOpenEncryptedJournal(item.id)
+          else if (event.key === 'Enter' && item.kind === 'document') props.onOpen(item.id)
           if (event.key === 'F2' && !isTrash) props.onRenameStart(item.id)
           if (event.key === 'Delete' && !isTrash && !deleteDisabled) props.onDelete(item.id)
           if (event.key === 'ArrowRight' && isContainer) props.onToggle(item.id)
@@ -830,11 +1037,12 @@ function TreeNode(props: TreeNodeProps) {
       >
         <button type="button" className="tree-chevron" onClick={(event) => {
           event.stopPropagation()
-          if (isContainer) props.onToggle(item.id)
+          if (isLockedJournal) props.onOpenEncryptedJournal(item.id)
+          else if (isContainer) props.onToggle(item.id)
         }} title={isExpanded ? 'Collapse' : 'Expand'}>
           {isContainer ? (isExpanded ? <ChevronDown size={15}/> : <ChevronRight size={15}/>) : <span/>}
         </button>
-        {isTrash ? <Trash2 size={16}/> : isJournal ? <Book size={16}/> : isFolder ? <Folder size={16}/> : <FileText size={16}/>}
+        {isTrash ? <Trash2 size={16}/> : isEncryptedJournal ? <Lock size={16}/> : isJournal ? <Book size={16}/> : isFolder ? <Folder size={16}/> : <FileText size={16}/>}
 
         {renamingId === item.id ? (
           <input
@@ -852,7 +1060,7 @@ function TreeNode(props: TreeNodeProps) {
           <button type="button" className="tree-title" title={item.title} onClick={(event) => {
             event.stopPropagation()
             props.onSelect(item.id)
-            item.kind === 'document' ? props.onOpen(item.id) : props.onToggle(item.id)
+            isLockedJournal ? props.onOpenEncryptedJournal(item.id) : item.kind === 'document' ? props.onOpen(item.id) : props.onToggle(item.id)
           }}>
             {item.title}
           </button>
@@ -865,11 +1073,19 @@ function TreeNode(props: TreeNodeProps) {
           {isContainer && !isTrash && <button type="button" onClick={(event) => {
             event.stopPropagation()
             props.onCreateDocument(item.id)
-          }} disabled={props.creationDisabled} title="New document"><Plus size={13}/></button>}
+          }} disabled={props.creationDisabled || isLockedJournal} title="New document"><Plus size={13}/></button>}
           {isContainer && !isTrash && <button type="button" onClick={(event) => {
             event.stopPropagation()
             props.onCreateFolder(item.id)
-          }} disabled={props.creationDisabled} title="New folder"><FolderPlus size={13}/></button>}
+          }} disabled={props.creationDisabled || isLockedJournal} title="New folder"><FolderPlus size={13}/></button>}
+          {isJournal && !isTrash && !isEncryptedJournal && <button type="button" onClick={(event) => {
+            event.stopPropagation()
+            props.onEncryptJournal(item.id)
+          }} title="Encrypt journal"><Lock size={13}/></button>}
+          {isJournal && !isTrash && isEncryptedJournal && <button type="button" onClick={(event) => {
+            event.stopPropagation()
+            props.onDecryptJournal(item.id)
+          }} title="Turn off encryption"><Unlock size={13}/></button>}
           {!isTrash && <button type="button" onClick={(event) => {
             event.stopPropagation()
             props.onDelete(item.id)
@@ -879,6 +1095,64 @@ function TreeNode(props: TreeNodeProps) {
       {isContainer && isExpanded && item.children.map((child) => (
         <TreeNode key={child.id} {...props} item={child} level={level + 1}/>
       ))}
+    </div>
+  )
+}
+
+function EncryptionDialog({state, onCancel, onSubmitPassword, onChangePassword}: {
+  state: NonNullable<EncryptionDialogState>
+  onCancel: () => void
+  onSubmitPassword: (password: string) => void
+  onChangePassword: (currentPassword: string, newPassword: string) => void
+}) {
+  const [password, setPassword] = useState('')
+  const [confirmPassword, setConfirmPassword] = useState('')
+  const [currentPassword, setCurrentPassword] = useState('')
+  const [newPassword, setNewPassword] = useState('')
+  const [newPasswordConfirm, setNewPasswordConfirm] = useState('')
+  const isChange = state.mode === 'change'
+  const title = state.mode === 'create' ? 'Create master password' : state.mode === 'change' ? 'Change master password' : 'Unlock encrypted journals'
+
+  useEffect(() => {
+    function onKeyDown(event: KeyboardEvent) {
+      if (event.key === 'Escape') onCancel()
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [onCancel])
+
+  function submit() {
+    if (isChange) {
+      if (!currentPassword.trim() || !newPassword.trim() || newPassword !== newPasswordConfirm) return
+      onChangePassword(currentPassword, newPassword)
+      return
+    }
+    if (!password.trim()) return
+    if (state.mode === 'create' && password !== confirmPassword) return
+    onSubmitPassword(password)
+  }
+
+  return (
+    <div className="dialog-backdrop" role="presentation" onMouseDown={onCancel}>
+      <section className="confirm-dialog encryption-dialog" role="dialog" aria-modal="true" aria-labelledby="encryption-title" onMouseDown={(event) => event.stopPropagation()}>
+        <h2 id="encryption-title">{title}</h2>
+        {isChange ? (
+          <div className="password-fields">
+            <input type="password" value={currentPassword} autoFocus placeholder="Current password" onChange={(event) => setCurrentPassword(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') submit() }}/>
+            <input type="password" value={newPassword} placeholder="New password" onChange={(event) => setNewPassword(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') submit() }}/>
+            <input type="password" value={newPasswordConfirm} placeholder="Confirm new password" onChange={(event) => setNewPasswordConfirm(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') submit() }}/>
+          </div>
+        ) : (
+          <div className="password-fields">
+            <input type="password" value={password} autoFocus placeholder="Master password" onChange={(event) => setPassword(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') submit() }}/>
+            {state.mode === 'create' && <input type="password" value={confirmPassword} placeholder="Confirm password" onChange={(event) => setConfirmPassword(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') submit() }}/>}
+          </div>
+        )}
+        <div className="dialog-actions">
+          <button type="button" onClick={onCancel}>Cancel</button>
+          <button type="button" onClick={submit}>{isChange ? 'Change password' : state.mode === 'create' ? 'Create password' : 'Unlock'}</button>
+        </div>
+      </section>
     </div>
   )
 }
@@ -899,6 +1173,51 @@ function DeleteDialog({target, onCancel, onConfirm}: {target: NonNullable<Delete
         <div className="dialog-actions">
           <button type="button" onClick={onCancel}>Cancel</button>
           <button type="button" className={target.item.kind === 'journal' || target.inTrash ? 'danger-action' : ''} onClick={onConfirm}>{action}</button>
+        </div>
+      </section>
+    </div>
+  )
+}
+
+function DecryptDialog({target, onCancel, onConfirm}: {target: TreeItem, onCancel: () => void, onConfirm: () => void}) {
+  useEffect(() => {
+    function onKeyDown(event: KeyboardEvent) {
+      if (event.key === 'Escape') onCancel()
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [onCancel])
+
+  return (
+    <div className="dialog-backdrop" role="presentation" onMouseDown={onCancel}>
+      <section className="confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="decrypt-title" onMouseDown={(event) => event.stopPropagation()}>
+        <h2 id="decrypt-title">Turn off encryption for "{target.title}"?</h2>
+        <p>This will create a plaintext copy of the Journal and remove the encrypted version. Large Journals might take a few minutes.</p>
+        <div className="dialog-actions">
+          <button type="button" onClick={onCancel}>Cancel</button>
+          <button type="button" onClick={onConfirm}>Turn off encryption</button>
+        </div>
+      </section>
+    </div>
+  )
+}
+
+function EncryptedNoticeDialog({journalTitle, onClose}: {journalTitle: string, onClose: () => void}) {
+  useEffect(() => {
+    function onKeyDown(event: KeyboardEvent) {
+      if (event.key === 'Escape' || event.key === 'Enter') onClose()
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [onClose])
+
+  return (
+    <div className="dialog-backdrop" role="presentation" onMouseDown={onClose}>
+      <section className="confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="encrypted-notice-title" onMouseDown={(event) => event.stopPropagation()}>
+        <h2 id="encrypted-notice-title">Encryption complete</h2>
+        <p>"{journalTitle}" has been encrypted. Its contents are excluded from search and will require the master password after Journal is restarted or locked.</p>
+        <div className="dialog-actions">
+          <button type="button" onClick={onClose}>OK</button>
         </div>
       </section>
     </div>
@@ -978,6 +1297,14 @@ function journalIdFor(items: TreeItem[], id: string) {
     current = current.parentId ? byId.get(current.parentId) : undefined
   }
   return ''
+}
+
+function encryptedJournalIds(items: TreeItem[]) {
+  return new Set(flattenTree(items).filter((item) => item.kind === 'journal' && item.encryptionState === 'encrypted').map((item) => item.id))
+}
+
+function encryptedJournalTitle(items: TreeItem[], journalId: string) {
+  return flattenTree(items).find((item) => item.id === journalId)?.title ?? 'Journal'
 }
 
 function isDescendantOf(items: TreeItem[], id: string, ancestorId: string) {
