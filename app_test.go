@@ -155,6 +155,12 @@ func TestDocumentLifecycleSearchAndTrash(t *testing.T) {
 	if doc.CreatedAt == "" || doc.UpdatedAt == "" {
 		t.Fatalf("expected document timestamps, got created=%q updated=%q", doc.CreatedAt, doc.UpdatedAt)
 	}
+	if doc.SpacingPreset != defaultSpacingPreset {
+		t.Fatalf("expected default spacing %q, got %q", defaultSpacingPreset, doc.SpacingPreset)
+	}
+	if _, err := service.UpdateDocumentSpacing(doc.ID, "compact"); err != nil {
+		t.Fatalf("update document spacing: %v", err)
+	}
 	settings, err := service.GetAppSettings()
 	if err != nil {
 		t.Fatalf("settings after create: %v", err)
@@ -188,6 +194,9 @@ func TestDocumentLifecycleSearchAndTrash(t *testing.T) {
 	}
 	if opened.UpdatedAt == doc.UpdatedAt {
 		t.Fatalf("expected updated timestamp to advance after flush")
+	}
+	if opened.SpacingPreset != "compact" {
+		t.Fatalf("expected compact spacing, got %q", opened.SpacingPreset)
 	}
 
 	results, err := service.SearchLibrary("autosave")

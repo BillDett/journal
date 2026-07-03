@@ -40,6 +40,7 @@ import {
   type DocumentResponse,
   type EncryptionStatusResponse,
   type ProseMirrorDoc,
+  type SpacingPreset,
   type TreeItem,
 } from './wails/libraryApi'
 import appIcon from './assets/appicon.png'
@@ -295,6 +296,24 @@ function App() {
       }
     } catch (error) {
       if (activeDocId.current === id && draftVersion.current === version) {
+        setSaveState('error')
+        setLastError(messageFromError(error))
+      }
+    }
+  }
+
+  async function updateActiveSpacing(spacingPreset: SpacingPreset) {
+    if (!activeDoc || activeDoc.spacingPreset === spacingPreset) return
+    const id = activeDoc.id
+    setActiveDoc((current) => current && current.id === id ? {...current, spacingPreset} : current)
+    setStatus('Spacing updated')
+    try {
+      const response = await api.UpdateDocumentSpacing(id, spacingPreset)
+      setActiveDoc((current) => current && current.id === id ? {...current, updatedAt: response.updatedAt} : current)
+      void refreshVisibleTree()
+    } catch (error) {
+      if (activeDocId.current === id) {
+        setActiveDoc((current) => current && current.id === id ? {...current, spacingPreset: activeDoc.spacingPreset} : current)
         setSaveState('error')
         setLastError(messageFromError(error))
       }
@@ -753,6 +772,7 @@ function App() {
               saveState={saveState}
               status={status}
               onDraft={updateActiveDraft}
+              onSpacingPresetChange={(spacingPreset) => void updateActiveSpacing(spacingPreset)}
               onFlush={() => void flushActive()}
               onRename={(title) => void renameItem(activeDoc.id, title)}
               onTitleFocused={() => setTitleFocusDocumentId('')}
@@ -827,13 +847,14 @@ type EditorPaneProps = {
   saveState: SaveState
   status: string
   onDraft: (content: ProseMirrorDoc) => Promise<void>
+  onSpacingPresetChange: (spacingPreset: SpacingPreset) => void
   onFlush: () => void
   onRename: (title: string) => void
   onTitleFocused?: () => void
   onEditorReady: (editor: Editor) => void
 }
 
-function EditorPane({document, focusTitle = false, saveState, status, onDraft, onFlush, onRename, onTitleFocused, onEditorReady}: EditorPaneProps) {
+function EditorPane({document, focusTitle = false, saveState, status, onDraft, onSpacingPresetChange, onFlush, onRename, onTitleFocused, onEditorReady}: EditorPaneProps) {
   const [title, setTitle] = useState(document.title)
   const [linkPopover, setLinkPopover] = useState<LinkPopoverState | null>(null)
   const [canCreateLink, setCanCreateLink] = useState(false)
@@ -866,7 +887,7 @@ function EditorPane({document, focusTitle = false, saveState, status, onDraft, o
     autofocus: focusTitle ? false : 'end',
     editorProps: {
       attributes: {
-        class: 'editor-page',
+        class: `editor-page spacing-${document.spacingPreset ?? 'compact'}`,
       },
       handleClick: (_view, _pos, event) => {
         if (!event.metaKey && !event.ctrlKey) return false
@@ -920,6 +941,12 @@ function EditorPane({document, focusTitle = false, saveState, status, onDraft, o
   useEffect(() => {
     setTitle(document.title)
   }, [document.id, document.title])
+
+  useEffect(() => {
+    if (!editor) return
+    editor.view.dom.classList.remove('spacing-compact', 'spacing-normal', 'spacing-relaxed')
+    editor.view.dom.classList.add(`spacing-${document.spacingPreset ?? 'compact'}`)
+  }, [document.spacingPreset, editor])
 
   useEffect(() => {
     if (!focusTitle) return
@@ -998,7 +1025,13 @@ function EditorPane({document, focusTitle = false, saveState, status, onDraft, o
           }}
           aria-label="Document title"
         />
-        <EditorToolbar editor={editor} canCreateLink={canCreateLink} onCreateLink={openCreateLinkPopover}/>
+        <EditorToolbar
+          editor={editor}
+          canCreateLink={canCreateLink}
+          spacingPreset={document.spacingPreset ?? 'compact'}
+          onCreateLink={openCreateLinkPopover}
+          onSpacingPresetChange={onSpacingPresetChange}
+        />
       </div>
       <div className="paper-scroll" onBlur={flushEditor}>
         <EditorContent editor={editor}/>
@@ -1123,10 +1156,12 @@ type EditorToolbarProps = {
   editor: Editor | null
   canCreateLink: boolean
   disabled?: boolean
+  spacingPreset: SpacingPreset
   onCreateLink: () => void
+  onSpacingPresetChange: (spacingPreset: SpacingPreset) => void
 }
 
-function EditorToolbar({editor, canCreateLink, disabled = false, onCreateLink}: EditorToolbarProps) {
+function EditorToolbar({editor, canCreateLink, disabled = false, spacingPreset, onCreateLink, onSpacingPresetChange}: EditorToolbarProps) {
   const blocked = disabled || !editor
   const linkBlocked = blocked || !canCreateLink
   return (
@@ -1138,6 +1173,18 @@ function EditorToolbar({editor, canCreateLink, disabled = false, onCreateLink}: 
       <Tool disabled={blocked} active={editor?.isActive('strike')} label="Strike" onClick={() => editor?.chain().focus().toggleStrike().run()}><Strikethrough size={16}/></Tool>
       <Tool disabled={blocked} active={editor?.isActive('highlight')} label="Highlight" onClick={() => editor?.chain().focus().toggleHighlight({color: '#fff1a8'}).run()}><Highlighter size={16}/></Tool>
       <Tool disabled={linkBlocked} active={editor?.isActive('link')} label="Create link" onClick={onCreateLink}><Link2 size={16}/></Tool>
+      <label className="spacing-control" title="Paragraph spacing">
+        <span>Spacing</span>
+        <select
+          value={spacingPreset}
+          disabled={blocked}
+          onChange={(event) => onSpacingPresetChange(event.target.value as SpacingPreset)}
+        >
+          <option value="compact">Compact</option>
+          <option value="normal">Normal</option>
+          <option value="relaxed">Relaxed</option>
+        </select>
+      </label>
       <span className="toolbar-divider"/>
       <Tool disabled={blocked} active={editor?.isActive('bulletList')} label="Bullet list" onClick={() => editor?.chain().focus().toggleBulletList().run()}><List size={16}/></Tool>
       <Tool disabled={blocked} active={editor?.isActive('orderedList')} label="Numbered list" onClick={() => editor?.chain().focus().toggleOrderedList().run()}><ListOrdered size={16}/></Tool>

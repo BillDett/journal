@@ -4,6 +4,8 @@ export type ProseMirrorDoc = JSONContent & {
   type: 'doc'
 }
 
+export type SpacingPreset = 'compact' | 'normal' | 'relaxed'
+
 export type TreeItem = {
   id: string
   parentId: string
@@ -35,6 +37,7 @@ export type DocumentResponse = {
   id: string
   title: string
   content: ProseMirrorDoc
+  spacingPreset: SpacingPreset
   schemaVersion: number
   createdAt: string
   updatedAt: string
@@ -86,6 +89,7 @@ type BackendAPI = {
   DeleteJournal: (id: string) => Promise<TreeResponse>
   OpenDocument: (id: string) => Promise<DocumentResponse>
   UpdateDocumentDraft: (id: string, content: ProseMirrorDoc, version: number) => Promise<{id: string, saveState: string, version: number}>
+  UpdateDocumentSpacing: (id: string, spacingPreset: SpacingPreset) => Promise<{id: string, saveState: string, savedAt: string, updatedAt: string, version: number}>
   FlushDocument: (id: string) => Promise<{id: string, saveState: string, savedAt: string, updatedAt: string, version: number}>
   SearchLibrary: (query: string) => Promise<SearchResponse>
   GetEncryptionStatus: () => Promise<EncryptionStatusResponse>
@@ -131,6 +135,7 @@ function missingBackend(): BackendAPI {
     DeleteJournal: fail,
     OpenDocument: fail,
     UpdateDocumentDraft: fail,
+    UpdateDocumentSpacing: fail,
     FlushDocument: fail,
     SearchLibrary: fail,
     GetEncryptionStatus: fail,

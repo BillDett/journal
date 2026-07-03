@@ -30,6 +30,7 @@ const (
 	defaultLibraryWidth       = 340
 	minLibraryWidth           = 260
 	maxLibraryWidth           = 620
+	defaultSpacingPreset      = "compact"
 
 	defaultAppName    = "Journal"
 	defaultAppVersion = "0.0.0-dev"
@@ -111,6 +112,10 @@ func (a *App) OpenDocument(id string) (DocumentResponse, error) {
 
 func (a *App) UpdateDocumentDraft(id string, content map[string]any, version int64) (DocumentDraftResponse, error) {
 	return a.service.UpdateDocumentDraft(id, content, version)
+}
+
+func (a *App) UpdateDocumentSpacing(id string, spacingPreset string) (DocumentSaveResponse, error) {
+	return a.service.UpdateDocumentSpacing(id, spacingPreset)
 }
 
 func (a *App) FlushDocument(id string) (DocumentSaveResponse, error) {
@@ -244,6 +249,7 @@ type DocumentResponse struct {
 	ID            string         `json:"id"`
 	Title         string         `json:"title"`
 	Content       map[string]any `json:"content"`
+	SpacingPreset string         `json:"spacingPreset"`
 	SchemaVersion int            `json:"schemaVersion"`
 	CreatedAt     string         `json:"createdAt"`
 	UpdatedAt     string         `json:"updatedAt"`
@@ -365,6 +371,7 @@ func (s *JournalService) migrate() error {
 			schema_version INTEGER NOT NULL,
 			content_json TEXT NOT NULL,
 			content_ciphertext BLOB NULL,
+			spacing_preset TEXT NOT NULL DEFAULT 'compact',
 			created_at TEXT NOT NULL,
 			updated_at TEXT NOT NULL
 		)`,
@@ -490,6 +497,7 @@ func (s *JournalService) migrateItemsKindConstraint() error {
 			schema_version INTEGER NOT NULL,
 			content_json TEXT NOT NULL,
 			content_ciphertext BLOB NULL,
+			spacing_preset TEXT NOT NULL DEFAULT 'compact',
 			created_at TEXT NOT NULL,
 			updated_at TEXT NOT NULL
 		)`,
@@ -532,6 +540,11 @@ func (s *JournalService) ensureEncryptionColumns() error {
 	}
 	if !documentColumns["content_ciphertext"] {
 		if _, err := s.db.Exec(`ALTER TABLE documents ADD COLUMN content_ciphertext BLOB NULL`); err != nil {
+			return err
+		}
+	}
+	if !documentColumns["spacing_preset"] {
+		if _, err := s.db.Exec(`ALTER TABLE documents ADD COLUMN spacing_preset TEXT NOT NULL DEFAULT 'compact'`); err != nil {
 			return err
 		}
 	}
@@ -707,9 +720,9 @@ func (s *JournalService) CreateDocument(parentID string) (DocumentResponse, erro
 		return DocumentResponse{}, err
 	}
 	if _, err := tx.Exec(
-		`INSERT INTO documents (item_id, schema_version, content_json, content_ciphertext, created_at, updated_at)
-		 VALUES (?, 1, ?, ?, ?, ?)`,
-		id, contentJSON, contentCiphertext, now, now,
+		`INSERT INTO documents (item_id, schema_version, content_json, content_ciphertext, spacing_preset, created_at, updated_at)
+		 VALUES (?, 1, ?, ?, ?, ?, ?)`,
+		id, contentJSON, contentCiphertext, defaultSpacingPreset, now, now,
 	); err != nil {
 		return DocumentResponse{}, err
 	}
@@ -1050,6 +1063,7 @@ func (s *JournalService) OpenDocument(id string) (DocumentResponse, error) {
 
 	var encoded string
 	var schemaVersion int
+	var spacingPreset string
 	if rawItem.EncryptionState == EncryptionEncrypted {
 		journalID, err := s.journalIDForItem(id)
 		if err != nil {
@@ -1064,9 +1078,9 @@ func (s *JournalService) OpenDocument(id string) (DocumentResponse, error) {
 		}
 		var contentCiphertext []byte
 		err = s.db.QueryRow(
-			`SELECT schema_version, content_ciphertext FROM documents WHERE item_id = ?`,
+			`SELECT schema_version, content_ciphertext, spacing_preset FROM documents WHERE item_id = ?`,
 			id,
-		).Scan(&schemaVersion, &contentCiphertext)
+		).Scan(&schemaVersion, &contentCiphertext, &spacingPreset)
 		if err != nil {
 			return DocumentResponse{}, err
 		}
@@ -1077,9 +1091,9 @@ func (s *JournalService) OpenDocument(id string) (DocumentResponse, error) {
 		encoded = string(plaintext)
 	} else {
 		err = s.db.QueryRow(
-			`SELECT schema_version, content_json FROM documents WHERE item_id = ?`,
+			`SELECT schema_version, content_json, spacing_preset FROM documents WHERE item_id = ?`,
 			id,
-		).Scan(&schemaVersion, &encoded)
+		).Scan(&schemaVersion, &encoded, &spacingPreset)
 		if err != nil {
 			return DocumentResponse{}, err
 		}
@@ -1103,6 +1117,7 @@ func (s *JournalService) OpenDocument(id string) (DocumentResponse, error) {
 		ID:            id,
 		Title:         item.Title,
 		Content:       content,
+		SpacingPreset: normalizeSpacingPreset(spacingPreset),
 		SchemaVersion: schemaVersion,
 		CreatedAt:     item.CreatedAt,
 		UpdatedAt:     item.UpdatedAt,
@@ -1136,6 +1151,36 @@ func (s *JournalService) UpdateDocumentDraft(id string, content map[string]any, 
 	s.lastDraftVersion[id] = version
 	s.mu.Unlock()
 	return DocumentDraftResponse{ID: id, SaveState: "dirty", Version: version}, nil
+}
+
+func (s *JournalService) UpdateDocumentSpacing(id string, spacingPreset string) (DocumentSaveResponse, error) {
+	spacingPreset = normalizeSpacingPreset(spacingPreset)
+	item, err := s.getRowItem(id)
+	if err != nil {
+		return DocumentSaveResponse{}, err
+	}
+	if item.Kind != KindDocument {
+		return DocumentSaveResponse{}, fmt.Errorf("item is not a document")
+	}
+	now := nowString()
+	tx, err := s.db.Begin()
+	if err != nil {
+		return DocumentSaveResponse{}, err
+	}
+	defer rollback(tx)
+	if _, err := tx.Exec(`UPDATE documents SET spacing_preset = ?, updated_at = ? WHERE item_id = ?`, spacingPreset, now, id); err != nil {
+		return DocumentSaveResponse{}, err
+	}
+	if _, err := tx.Exec(`UPDATE items SET updated_at = ? WHERE id = ?`, now, id); err != nil {
+		return DocumentSaveResponse{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return DocumentSaveResponse{}, err
+	}
+	s.mu.Lock()
+	version := s.lastDraftVersion[id]
+	s.mu.Unlock()
+	return DocumentSaveResponse{ID: id, SaveState: "saved", SavedAt: now, UpdatedAt: now, Version: version}, nil
 }
 
 func (s *JournalService) FlushDocument(id string) (DocumentSaveResponse, error) {
@@ -2047,7 +2092,8 @@ func (s *JournalService) copyItemToParentTx(tx *sql.Tx, sourceID string, parentI
 	if source.Kind == KindDocument {
 		var schemaVersion int
 		var encoded string
-		if err := tx.QueryRow(`SELECT schema_version, content_json FROM documents WHERE item_id = ?`, sourceID).Scan(&schemaVersion, &encoded); err != nil {
+		var spacingPreset string
+		if err := tx.QueryRow(`SELECT schema_version, content_json, spacing_preset FROM documents WHERE item_id = ?`, sourceID).Scan(&schemaVersion, &encoded, &spacingPreset); err != nil {
 			return "", err
 		}
 		if draft, ok := s.pendingDraftSnapshot(sourceID); ok {
@@ -2058,9 +2104,9 @@ func (s *JournalService) copyItemToParentTx(tx *sql.Tx, sourceID string, parentI
 			encoded = string(data)
 		}
 		if _, err := tx.Exec(
-			`INSERT INTO documents (item_id, schema_version, content_json, created_at, updated_at)
-			 VALUES (?, ?, ?, ?, ?)`,
-			newID, schemaVersion, encoded, now, now,
+			`INSERT INTO documents (item_id, schema_version, content_json, spacing_preset, created_at, updated_at)
+			 VALUES (?, ?, ?, ?, ?, ?)`,
+			newID, schemaVersion, encoded, normalizeSpacingPreset(spacingPreset), now, now,
 		); err != nil {
 			return "", err
 		}
@@ -2176,6 +2222,15 @@ func normalizeTitle(title string, fallback string) string {
 		return fallback
 	}
 	return title
+}
+
+func normalizeSpacingPreset(spacingPreset string) string {
+	switch strings.TrimSpace(strings.ToLower(spacingPreset)) {
+	case "compact", "normal", "relaxed":
+		return strings.TrimSpace(strings.ToLower(spacingPreset))
+	default:
+		return defaultSpacingPreset
+	}
 }
 
 func ftsPhrase(query string) string {

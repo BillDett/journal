@@ -40,7 +40,8 @@ body {
 }
 
 button,
-input {
+input,
+select {
   font: inherit;
 }
 
@@ -119,6 +120,23 @@ button:disabled {
   height: 24px;
   background: var(--line);
   margin: 0 2px;
+}
+
+.spacing-control {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.spacing-control select {
+  height: 30px;
+  border: 1px solid #cbd2da;
+  border-radius: 7px;
+  background: var(--button);
+  color: #252a31;
+  padding: 0 28px 0 9px;
 }
 
 .save-indicator {
@@ -500,8 +518,72 @@ body.is-resizing-library {
   font-size: 18px;
 }
 
+.editor-page.spacing-compact {
+  line-height: 1.28;
+}
+
+.editor-page.spacing-normal {
+  line-height: 1.45;
+}
+
+.editor-page.spacing-relaxed {
+  line-height: 1.7;
+}
+
 .editor-page > *:first-child {
   margin-top: 0;
+}
+
+.editor-page p {
+  margin: 0 0 0.65em;
+}
+
+.editor-page.spacing-compact p {
+  margin-bottom: 0.35em;
+}
+
+.editor-page.spacing-relaxed p {
+  margin-bottom: 1em;
+}
+
+.editor-page ul,
+.editor-page ol {
+  margin-top: 0.35em;
+  margin-bottom: 0.65em;
+  padding-left: 1.4em;
+}
+
+.editor-page.spacing-compact ul,
+.editor-page.spacing-compact ol {
+  margin-top: 0.2em;
+  margin-bottom: 0.35em;
+}
+
+.editor-page.spacing-relaxed ul,
+.editor-page.spacing-relaxed ol {
+  margin-top: 0.5em;
+  margin-bottom: 1em;
+}
+
+.editor-page li {
+  margin: 0.12em 0;
+}
+
+.editor-page.spacing-compact li {
+  margin: 0.04em 0;
+}
+
+.editor-page.spacing-relaxed li {
+  margin: 0.2em 0;
+}
+
+.editor-page li p {
+  margin: 0;
+}
+
+.editor-page li > ul,
+.editor-page li > ol {
+  margin-bottom: 0;
 }
 
 .editor-page h1,
