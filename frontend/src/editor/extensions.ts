@@ -12,6 +12,7 @@ import TextAlign from '@tiptap/extension-text-align'
 import Typography from '@tiptap/extension-typography'
 import Underline from '@tiptap/extension-underline'
 import StarterKit from '@tiptap/starter-kit'
+import {AttachmentImage} from './attachmentImage'
 import {BlockIndent} from './blockIndent'
 import {ListNormalization} from './listNormalization'
 
@@ -23,6 +24,7 @@ export const editorExtensions = [
   }),
   BlockIndent,
   ListNormalization,
+  AttachmentImage,
   Link.configure({
     autolink: true,
     defaultProtocol: 'https',

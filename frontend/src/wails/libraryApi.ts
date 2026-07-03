@@ -46,6 +46,19 @@ export type DocumentResponse = {
   saveState: string
 }
 
+export type DocumentAttachmentResponse = {
+  id: string
+  documentId: string
+  mimeType: string
+  originalName: string
+  sizeBytes: number
+}
+
+export type DocumentAttachmentDataResponse = {
+  id: string
+  dataUrl: string
+}
+
 export type SearchResponse = {
   query: string
   items: TreeItem[]
@@ -89,6 +102,9 @@ type BackendAPI = {
   DeleteJournal: (id: string) => Promise<TreeResponse>
   OpenDocument: (id: string) => Promise<DocumentResponse>
   UpdateDocumentDraft: (id: string, content: ProseMirrorDoc, version: number) => Promise<{id: string, saveState: string, version: number}>
+  CreateDocumentAttachment: (documentId: string, name: string, mimeType: string, dataBase64: string) => Promise<DocumentAttachmentResponse>
+  PickDocumentImage: (documentId: string) => Promise<DocumentAttachmentResponse>
+  GetDocumentAttachmentDataURL: (attachmentId: string) => Promise<DocumentAttachmentDataResponse>
   UpdateDocumentSpacing: (id: string, spacingPreset: SpacingPreset) => Promise<{id: string, saveState: string, savedAt: string, updatedAt: string, version: number}>
   FlushDocument: (id: string) => Promise<{id: string, saveState: string, savedAt: string, updatedAt: string, version: number}>
   SearchLibrary: (query: string) => Promise<SearchResponse>
@@ -135,6 +151,9 @@ function missingBackend(): BackendAPI {
     DeleteJournal: fail,
     OpenDocument: fail,
     UpdateDocumentDraft: fail,
+    CreateDocumentAttachment: fail,
+    PickDocumentImage: fail,
+    GetDocumentAttachmentDataURL: fail,
     UpdateDocumentSpacing: fail,
     FlushDocument: fail,
     SearchLibrary: fail,

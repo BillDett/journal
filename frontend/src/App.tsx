@@ -13,6 +13,7 @@ import {
   Folder,
   FolderPlus,
   Highlighter,
+  Image as ImageIcon,
   Italic,
   KeyRound,
   Link2,
@@ -51,6 +52,8 @@ type SaveState = 'idle' | 'dirty' | 'saving' | 'saved' | 'error'
 const libraryWidthMin = 260
 const libraryWidthDefault = 340
 const libraryWidthMax = 620
+const maxInlineImageBytes = 20 * 1024 * 1024
+const supportedImageTypes = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp'])
 
 type DeleteTarget = {
   item: TreeItem
@@ -774,6 +777,7 @@ function App() {
               onDraft={updateActiveDraft}
               onSpacingPresetChange={(spacingPreset) => void updateActiveSpacing(spacingPreset)}
               onFlush={() => void flushActive()}
+              onError={setLastError}
               onRename={(title) => void renameItem(activeDoc.id, title)}
               onTitleFocused={() => setTitleFocusDocumentId('')}
               onEditorReady={(editor) => {
@@ -849,16 +853,18 @@ type EditorPaneProps = {
   onDraft: (content: ProseMirrorDoc) => Promise<void>
   onSpacingPresetChange: (spacingPreset: SpacingPreset) => void
   onFlush: () => void
+  onError: (message: string) => void
   onRename: (title: string) => void
   onTitleFocused?: () => void
   onEditorReady: (editor: Editor) => void
 }
 
-function EditorPane({document, focusTitle = false, saveState, status, onDraft, onSpacingPresetChange, onFlush, onRename, onTitleFocused, onEditorReady}: EditorPaneProps) {
+function EditorPane({document, focusTitle = false, saveState, status, onDraft, onSpacingPresetChange, onFlush, onError, onRename, onTitleFocused, onEditorReady}: EditorPaneProps) {
   const [title, setTitle] = useState(document.title)
   const [linkPopover, setLinkPopover] = useState<LinkPopoverState | null>(null)
   const [canCreateLink, setCanCreateLink] = useState(false)
   const titleInputRef = useRef<HTMLInputElement | null>(null)
+  const imageInputRef = useRef<HTMLInputElement | null>(null)
   const editorRef = useRef<Editor | null>(null)
   const draftTimer = useRef<number | undefined>(undefined)
   const pendingDraft = useRef(false)
@@ -902,6 +908,19 @@ function EditorPane({document, focusTitle = false, saveState, status, onDraft, o
         return true
       },
       handleDOMEvents: {
+        drop: (view, event) => {
+          const droppedFiles = Array.from(event.dataTransfer?.files ?? [])
+          if (droppedFiles.length === 0) return false
+          event.preventDefault()
+          const files = droppedFiles.filter(isSupportedImageFile)
+          if (files.length === 0) {
+            onError('Unsupported image format.')
+            return true
+          }
+          const position = view.posAtCoords({left: event.clientX, top: event.clientY})
+          void insertImageFiles(files, position?.pos)
+          return true
+        },
         contextmenu: (view, event) => {
           const {from, to} = view.state.selection
           if (from === to) return false
@@ -1007,6 +1026,44 @@ function EditorPane({document, focusTitle = false, saveState, status, onDraft, o
     setLinkPopover(null)
   }
 
+  function openImageFilePicker() {
+    imageInputRef.current?.click()
+  }
+
+  async function insertImageFiles(files: File[], position?: number) {
+    if (!editor) return
+    let insertPosition = position
+    for (const file of files) {
+      try {
+        if (file.size > maxInlineImageBytes) {
+          throw new Error('Image is larger than the 20 MB limit.')
+        }
+        if (!isSupportedImageFile(file)) {
+          throw new Error('Unsupported image format.')
+        }
+        const dataURL = await fileToDataURL(file)
+        const attachment = await api.CreateDocumentAttachment(document.id, file.name, file.type, dataURL)
+        if (!attachment.id) continue
+        insertAttachmentImage(attachment.id, attachment.originalName || file.name, insertPosition)
+        if (typeof insertPosition === 'number') insertPosition += 1
+      } catch (error) {
+        onError(messageFromError(error))
+      }
+    }
+  }
+
+  function insertAttachmentImage(attachmentId: string, alt: string, position?: number) {
+    if (!editor || !attachmentId) return
+    const command = editor.chain().focus()
+    if (typeof position === 'number') {
+      command.setTextSelection(position)
+    }
+    command.insertContent({
+      type: 'attachmentImage',
+      attrs: {attachmentId, alt},
+    }).run()
+  }
+
   return (
     <>
       <div className="document-head">
@@ -1025,11 +1082,24 @@ function EditorPane({document, focusTitle = false, saveState, status, onDraft, o
           }}
           aria-label="Document title"
         />
+        <input
+          ref={imageInputRef}
+          className="hidden-file-input"
+          type="file"
+          accept="image/png,image/jpeg,image/gif,image/webp"
+          onChange={(event) => {
+            const files = Array.from(event.currentTarget.files ?? [])
+            event.currentTarget.value = ''
+            if (files.length === 0) return
+            void insertImageFiles(files)
+          }}
+        />
         <EditorToolbar
           editor={editor}
           canCreateLink={canCreateLink}
           spacingPreset={document.spacingPreset ?? 'compact'}
           onCreateLink={openCreateLinkPopover}
+          onInsertImage={openImageFilePicker}
           onSpacingPresetChange={onSpacingPresetChange}
         />
       </div>
@@ -1141,6 +1211,25 @@ function normalizeLinkURL(value: string) {
   }
 }
 
+function isSupportedImageFile(file: File) {
+  return supportedImageTypes.has(file.type)
+}
+
+function fileToDataURL(file: File) {
+  return new Promise<string>((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => {
+      if (typeof reader.result === 'string') {
+        resolve(reader.result)
+        return
+      }
+      reject(new Error('Could not read image.'))
+    }
+    reader.onerror = () => reject(reader.error ?? new Error('Could not read image.'))
+    reader.readAsDataURL(file)
+  })
+}
+
 function openExternalLink(value: string) {
   const href = normalizeLinkURL(value)
   if (!href) return
@@ -1158,10 +1247,11 @@ type EditorToolbarProps = {
   disabled?: boolean
   spacingPreset: SpacingPreset
   onCreateLink: () => void
+  onInsertImage: () => void
   onSpacingPresetChange: (spacingPreset: SpacingPreset) => void
 }
 
-function EditorToolbar({editor, canCreateLink, disabled = false, spacingPreset, onCreateLink, onSpacingPresetChange}: EditorToolbarProps) {
+function EditorToolbar({editor, canCreateLink, disabled = false, spacingPreset, onCreateLink, onInsertImage, onSpacingPresetChange}: EditorToolbarProps) {
   const blocked = disabled || !editor
   const linkBlocked = blocked || !canCreateLink
   return (
@@ -1173,6 +1263,7 @@ function EditorToolbar({editor, canCreateLink, disabled = false, spacingPreset, 
       <Tool disabled={blocked} active={editor?.isActive('strike')} label="Strike" onClick={() => editor?.chain().focus().toggleStrike().run()}><Strikethrough size={16}/></Tool>
       <Tool disabled={blocked} active={editor?.isActive('highlight')} label="Highlight" onClick={() => editor?.chain().focus().toggleHighlight({color: '#fff1a8'}).run()}><Highlighter size={16}/></Tool>
       <Tool disabled={linkBlocked} active={editor?.isActive('link')} label="Create link" onClick={onCreateLink}><Link2 size={16}/></Tool>
+      <Tool disabled={blocked} label="Insert image" onClick={onInsertImage}><ImageIcon size={16}/></Tool>
       <label className="spacing-control" title="Paragraph spacing">
         <span>Spacing</span>
         <select

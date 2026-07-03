@@ -327,6 +327,43 @@ func (s *JournalService) EncryptJournal(journalID string) (TreeResponse, error) 
 			); err != nil {
 				return TreeResponse{}, err
 			}
+			attachmentRows, err := tx.Query(`SELECT id, content_blob FROM document_attachments WHERE document_id = ?`, item.ID)
+			if err != nil {
+				return TreeResponse{}, err
+			}
+			var attachments []struct {
+				id   string
+				data []byte
+			}
+			for attachmentRows.Next() {
+				var attachment struct {
+					id   string
+					data []byte
+				}
+				if err := attachmentRows.Scan(&attachment.id, &attachment.data); err != nil {
+					_ = attachmentRows.Close()
+					return TreeResponse{}, err
+				}
+				attachments = append(attachments, attachment)
+			}
+			if err := attachmentRows.Close(); err != nil {
+				return TreeResponse{}, err
+			}
+			if err := attachmentRows.Err(); err != nil {
+				return TreeResponse{}, err
+			}
+			for _, attachment := range attachments {
+				attachmentCiphertext, err := sealField(dataKey, "document_attachments", attachment.id, "content_blob", keyID, attachment.data)
+				if err != nil {
+					return TreeResponse{}, err
+				}
+				if _, err := tx.Exec(
+					`UPDATE document_attachments SET content_blob = NULL, content_ciphertext = ? WHERE id = ?`,
+					attachmentCiphertext, attachment.id,
+				); err != nil {
+					return TreeResponse{}, err
+				}
+			}
 		}
 	}
 	if err := s.deleteFTSDescendantsTx(tx, journalID); err != nil {
@@ -463,11 +500,12 @@ func (s *JournalService) copyEncryptedChildrenToPlaintextTx(tx *sql.Tx, sourcePa
 		}
 		if source.Kind == KindDocument {
 			var schemaVersion int
+			var spacingPreset string
 			var contentCiphertext []byte
 			if err := tx.QueryRow(
-				`SELECT schema_version, content_ciphertext FROM documents WHERE item_id = ?`,
+				`SELECT schema_version, spacing_preset, content_ciphertext FROM documents WHERE item_id = ?`,
 				source.ID,
-			).Scan(&schemaVersion, &contentCiphertext); err != nil {
+			).Scan(&schemaVersion, &spacingPreset, &contentCiphertext); err != nil {
 				return err
 			}
 			encoded, err := openField(key, "documents", source.ID, "content_json", keyID, contentCiphertext)
@@ -475,11 +513,28 @@ func (s *JournalService) copyEncryptedChildrenToPlaintextTx(tx *sql.Tx, sourcePa
 				return err
 			}
 			if _, err := tx.Exec(
-				`INSERT INTO documents (item_id, schema_version, content_json, created_at, updated_at)
-				 VALUES (?, ?, ?, ?, ?)`,
-				newID, schemaVersion, string(encoded), source.CreatedAt, source.UpdatedAt,
+				`INSERT INTO documents (item_id, schema_version, content_json, spacing_preset, created_at, updated_at)
+				 VALUES (?, ?, ?, ?, ?, ?)`,
+				newID, schemaVersion, string(encoded), normalizeSpacingPreset(spacingPreset), source.CreatedAt, source.UpdatedAt,
 			); err != nil {
 				return err
+			}
+			attachmentIDMap, err := s.copyDocumentAttachmentsTx(tx, source.ID, newID, key, keyID)
+			if err != nil {
+				return err
+			}
+			if len(attachmentIDMap) > 0 {
+				var content map[string]any
+				if err := json.Unmarshal(encoded, &content); err != nil {
+					return err
+				}
+				encodedContent, err := json.Marshal(remapAttachmentIDsInContent(content, attachmentIDMap))
+				if err != nil {
+					return err
+				}
+				if _, err := tx.Exec(`UPDATE documents SET content_json = ? WHERE item_id = ?`, string(encodedContent), newID); err != nil {
+					return err
+				}
 			}
 			if err := s.syncFTSTx(tx, newID); err != nil {
 				return err

@@ -3,6 +3,7 @@ package main
 import (
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -235,6 +236,150 @@ func TestDocumentLifecycleSearchAndTrash(t *testing.T) {
 	}
 	if _, err := service.OpenDocument(doc.ID); err == nil {
 		t.Fatal("expected permanent delete to remove document")
+	}
+}
+
+func TestDocumentImageAttachmentLifecycle(t *testing.T) {
+	service := newTestService(t)
+
+	doc, err := service.CreateDocument("")
+	if err != nil {
+		t.Fatalf("create document: %v", err)
+	}
+	imageData := []byte{0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d}
+	attachment, err := service.createDocumentAttachment(doc.ID, "note.png", "image/png", imageData)
+	if err != nil {
+		t.Fatalf("create attachment: %v", err)
+	}
+	content := map[string]any{
+		"type": "doc",
+		"content": []any{
+			map[string]any{
+				"type": "attachmentImage",
+				"attrs": map[string]any{
+					"attachmentId": attachment.ID,
+					"alt":          "note.png",
+				},
+			},
+		},
+	}
+	if _, err := service.UpdateDocumentDraft(doc.ID, content, 1); err != nil {
+		t.Fatalf("draft with attachment: %v", err)
+	}
+	if _, err := service.FlushDocument(doc.ID); err != nil {
+		t.Fatalf("flush with attachment: %v", err)
+	}
+	data, err := service.GetDocumentAttachmentDataURL(attachment.ID)
+	if err != nil {
+		t.Fatalf("get attachment: %v", err)
+	}
+	if !strings.HasPrefix(data.DataURL, "data:image/png;base64,") {
+		t.Fatalf("expected png data url, got %q", data.DataURL)
+	}
+
+	if _, err := service.UpdateDocumentDraft(doc.ID, emptyDocument(), 2); err != nil {
+		t.Fatalf("draft without attachment: %v", err)
+	}
+	if _, err := service.FlushDocument(doc.ID); err != nil {
+		t.Fatalf("flush without attachment: %v", err)
+	}
+	if _, err := service.GetDocumentAttachmentDataURL(attachment.ID); err == nil {
+		t.Fatal("expected unreferenced attachment to be deleted")
+	}
+}
+
+func TestEncryptedDocumentImageAttachmentLifecycle(t *testing.T) {
+	service := newTestService(t)
+
+	if err := service.CreateMasterPassword("correct horse battery staple"); err != nil {
+		t.Fatalf("create master password: %v", err)
+	}
+	if err := service.UnlockEncryption("correct horse battery staple"); err != nil {
+		t.Fatalf("unlock: %v", err)
+	}
+	status, err := service.GetEncryptionStatus()
+	if err != nil {
+		t.Fatalf("encryption status: %v", err)
+	}
+	if !status.Unlocked {
+		t.Fatal("expected unlocked encryption status")
+	}
+
+	tree, err := service.GetLibraryTree()
+	if err != nil {
+		t.Fatalf("tree: %v", err)
+	}
+	journal := tree.Items[0]
+	doc, err := service.CreateDocument(journal.ID)
+	if err != nil {
+		t.Fatalf("create document: %v", err)
+	}
+	if _, err := service.EncryptJournal(journal.ID); err != nil {
+		t.Fatalf("encrypt journal: %v", err)
+	}
+
+	imageData := []byte{0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d}
+	attachment, err := service.createDocumentAttachment(doc.ID, "secret.png", "image/png", imageData)
+	if err != nil {
+		t.Fatalf("create encrypted attachment: %v", err)
+	}
+	content := map[string]any{
+		"type": "doc",
+		"content": []any{
+			map[string]any{
+				"type": "attachmentImage",
+				"attrs": map[string]any{
+					"attachmentId": attachment.ID,
+					"alt":          "secret.png",
+				},
+			},
+		},
+	}
+	if _, err := service.UpdateDocumentDraft(doc.ID, content, 1); err != nil {
+		t.Fatalf("draft encrypted attachment: %v", err)
+	}
+	if _, err := service.FlushDocument(doc.ID); err != nil {
+		t.Fatalf("flush encrypted attachment: %v", err)
+	}
+	data, err := service.GetDocumentAttachmentDataURL(attachment.ID)
+	if err != nil {
+		t.Fatalf("get encrypted attachment: %v", err)
+	}
+	if !strings.HasPrefix(data.DataURL, "data:image/png;base64,") {
+		t.Fatalf("expected png data url, got %q", data.DataURL)
+	}
+}
+
+func TestCreateAndRenameDocumentInEncryptedJournal(t *testing.T) {
+	service := newTestService(t)
+
+	if err := service.CreateMasterPassword("correct horse battery staple"); err != nil {
+		t.Fatalf("create master password: %v", err)
+	}
+	if err := service.UnlockEncryption("correct horse battery staple"); err != nil {
+		t.Fatalf("unlock: %v", err)
+	}
+	tree, err := service.GetLibraryTree()
+	if err != nil {
+		t.Fatalf("tree: %v", err)
+	}
+	journal := tree.Items[0]
+	if _, err := service.EncryptJournal(journal.ID); err != nil {
+		t.Fatalf("encrypt journal: %v", err)
+	}
+	doc, err := service.CreateDocument(journal.ID)
+	if err != nil {
+		t.Fatalf("create encrypted document: %v", err)
+	}
+	if _, err := service.RenameItem(doc.ID, "Encrypted Draft"); err != nil {
+		t.Fatalf("rename encrypted document: %v", err)
+	}
+	opened, err := service.OpenDocument(doc.ID)
+	if err != nil {
+		t.Fatalf("open encrypted document: %v", err)
+	}
+	if opened.Title != "Encrypted Draft" {
+		t.Fatalf("expected renamed encrypted document title, got %q", opened.Title)
 	}
 }
 

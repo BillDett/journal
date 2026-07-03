@@ -139,6 +139,10 @@ button:disabled {
   padding: 0 28px 0 9px;
 }
 
+.hidden-file-input {
+  display: none;
+}
+
 .save-indicator {
   min-width: 118px;
   height: 30px;
@@ -584,6 +588,37 @@ body.is-resizing-library {
 .editor-page li > ul,
 .editor-page li > ol {
   margin-bottom: 0;
+}
+
+.attachment-image {
+  display: block;
+  margin: 0.8em 0;
+}
+
+.attachment-image img {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  border-radius: 6px;
+}
+
+.attachment-image.selected img,
+.ProseMirror-selectednode.attachment-image img {
+  outline: 3px solid rgba(18, 111, 145, 0.28);
+  outline-offset: 3px;
+}
+
+.attachment-image-placeholder {
+  display: inline-flex;
+  min-width: 180px;
+  min-height: 72px;
+  align-items: center;
+  justify-content: center;
+  border: 1px dashed #b8c2cc;
+  border-radius: 6px;
+  padding: 12px;
+  color: var(--muted);
+  font-size: 13px;
 }
 
 .editor-page h1,

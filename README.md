@@ -12,15 +12,12 @@ Journal is a local desktop writing application that just lets you write and orga
 
 ## Current Features
 
-- SQLite-backed document and folder library
-- Editable document titles
-- Tiptap rich-text editor with headings, formatting, lists, tasks, tables, autolinking, highlights, and word count
-- Automatic draft persistence through the Go backend
-- Folder and document creation, rename, move, and delete
-- Trash folder with permanent delete behavior for items already in Trash
-- Drag and drop into folders or back to the top level
-- Full-text search across folder titles, document titles, and saved document body text using SQLite FTS
-- Configurable autosave interval in the app UI
+- Rich-text editor with headings, formatting, lists, tasks, tables, autolinking, highlights, and word count
+- Simple hierarchical model of Journals containing Folders and Documents- organize it the way you want!
+- Journal storage in a single file, with autosave
+- Full-text search across folder titles, document titles, and saved document body text
+- Ordered and bulleted outlines
+- Inline image support
 - Strong encryption per-Journal, locked and unlocked via a single master password.
 
 ## Requirements
