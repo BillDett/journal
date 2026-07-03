@@ -12,6 +12,7 @@ import TextAlign from '@tiptap/extension-text-align'
 import Typography from '@tiptap/extension-typography'
 import Underline from '@tiptap/extension-underline'
 import StarterKit from '@tiptap/starter-kit'
+import {BlockIndent} from './blockIndent'
 import {ListNormalization} from './listNormalization'
 
 export const editorExtensions = [
@@ -20,6 +21,7 @@ export const editorExtensions = [
       levels: [1, 2, 3],
     },
   }),
+  BlockIndent,
   ListNormalization,
   Link.configure({
     autolink: true,
