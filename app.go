@@ -34,6 +34,7 @@ const (
 	maxLibraryWidth           = 620
 	defaultSpacingPreset      = "compact"
 	maxImageAttachmentBytes   = 20 * 1024 * 1024
+	detachedAttachmentGrace   = 24 * time.Hour
 
 	defaultAppName    = "Journal"
 	defaultAppVersion = "0.0.0-dev"
@@ -60,6 +61,9 @@ func (a *App) startup(ctx context.Context) {
 	}
 	service, err := OpenJournalService(dbPath)
 	if err != nil {
+		panic(err)
+	}
+	if err := service.PurgeDetachedAttachments(detachedAttachmentGrace); err != nil {
 		panic(err)
 	}
 	a.service = service
@@ -438,7 +442,8 @@ func (s *JournalService) migrate() error {
 			size_bytes INTEGER NOT NULL,
 			content_blob BLOB NULL,
 			content_ciphertext BLOB NULL,
-			created_at TEXT NOT NULL
+			created_at TEXT NOT NULL,
+			detached_at TEXT NULL
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_document_attachments_document ON document_attachments(document_id)`,
 		`CREATE TABLE IF NOT EXISTS encryption_master (
@@ -470,6 +475,9 @@ func (s *JournalService) migrate() error {
 		return err
 	}
 	if err := s.ensureEncryptionColumns(); err != nil {
+		return err
+	}
+	if err := s.ensureAttachmentColumns(); err != nil {
 		return err
 	}
 	if err := s.ensureTrash(); err != nil {
@@ -600,6 +608,19 @@ func (s *JournalService) ensureEncryptionColumns() error {
 	}
 	if !documentColumns["spacing_preset"] {
 		if _, err := s.db.Exec(`ALTER TABLE documents ADD COLUMN spacing_preset TEXT NOT NULL DEFAULT 'compact'`); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *JournalService) ensureAttachmentColumns() error {
+	attachmentColumns, err := tableColumns(s.db, "document_attachments")
+	if err != nil {
+		return err
+	}
+	if !attachmentColumns["detached_at"] {
+		if _, err := s.db.Exec(`ALTER TABLE document_attachments ADD COLUMN detached_at TEXT NULL`); err != nil {
 			return err
 		}
 	}
@@ -1590,7 +1611,7 @@ func (s *JournalService) saveDocumentContent(id string, content map[string]any) 
 	if _, err := tx.Exec(`UPDATE items SET updated_at = ? WHERE id = ?`, now, id); err != nil {
 		return "", err
 	}
-	if err := s.deleteUnreferencedAttachmentsTx(tx, id, content); err != nil {
+	if err := s.reconcileDocumentAttachmentsTx(tx, id, content); err != nil {
 		return "", err
 	}
 	if err := s.syncFTSTx(tx, id); err != nil {
@@ -2503,21 +2524,24 @@ func remapAttachmentIDsInContent(content map[string]any, idMap map[string]string
 	return cloned
 }
 
-func (s *JournalService) deleteUnreferencedAttachmentsTx(tx *sql.Tx, documentID string, content map[string]any) error {
+func (s *JournalService) reconcileDocumentAttachmentsTx(tx *sql.Tx, documentID string, content map[string]any) error {
 	referenced := attachmentIDsFromContent(content)
 	rows, err := tx.Query(`SELECT id FROM document_attachments WHERE document_id = ?`, documentID)
 	if err != nil {
 		return err
 	}
-	var deleted []string
+	var detached []string
+	var attached []string
 	for rows.Next() {
 		var id string
 		if err := rows.Scan(&id); err != nil {
 			_ = rows.Close()
 			return err
 		}
-		if !referenced[id] {
-			deleted = append(deleted, id)
+		if referenced[id] {
+			attached = append(attached, id)
+		} else {
+			detached = append(detached, id)
 		}
 	}
 	if err := rows.Close(); err != nil {
@@ -2526,18 +2550,33 @@ func (s *JournalService) deleteUnreferencedAttachmentsTx(tx *sql.Tx, documentID 
 	if err := rows.Err(); err != nil {
 		return err
 	}
-	for _, id := range deleted {
-		if _, err := tx.Exec(`DELETE FROM document_attachments WHERE id = ?`, id); err != nil {
+	for _, id := range attached {
+		if _, err := tx.Exec(`UPDATE document_attachments SET detached_at = NULL WHERE id = ?`, id); err != nil {
+			return err
+		}
+	}
+	now := nowString()
+	for _, id := range detached {
+		if _, err := tx.Exec(`UPDATE document_attachments SET detached_at = COALESCE(detached_at, ?) WHERE id = ?`, now, id); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
+func (s *JournalService) PurgeDetachedAttachments(gracePeriod time.Duration) error {
+	if gracePeriod < 0 {
+		gracePeriod = 0
+	}
+	cutoff := time.Now().UTC().Add(-gracePeriod).Format(time.RFC3339Nano)
+	_, err := s.db.Exec(`DELETE FROM document_attachments WHERE detached_at IS NOT NULL AND detached_at <= ?`, cutoff)
+	return err
+}
+
 func (s *JournalService) copyDocumentAttachmentsTx(tx *sql.Tx, sourceDocumentID string, targetDocumentID string, key []byte, keyID string) (map[string]string, error) {
 	rows, err := tx.Query(
 		`SELECT id, mime_type, original_name, size_bytes, content_blob, content_ciphertext
-		 FROM document_attachments WHERE document_id = ?`,
+		 FROM document_attachments WHERE document_id = ? AND detached_at IS NULL`,
 		sourceDocumentID,
 	)
 	if err != nil {

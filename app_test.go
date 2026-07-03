@@ -1,10 +1,12 @@
 package main
 
 import (
+	"database/sql"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func newTestService(t *testing.T) *JournalService {
@@ -283,8 +285,38 @@ func TestDocumentImageAttachmentLifecycle(t *testing.T) {
 	if _, err := service.FlushDocument(doc.ID); err != nil {
 		t.Fatalf("flush without attachment: %v", err)
 	}
+	if _, err := service.GetDocumentAttachmentDataURL(attachment.ID); err != nil {
+		t.Fatalf("expected detached attachment to remain available for undo: %v", err)
+	}
+	if _, err := service.UpdateDocumentDraft(doc.ID, content, 3); err != nil {
+		t.Fatalf("draft restored attachment: %v", err)
+	}
+	if _, err := service.FlushDocument(doc.ID); err != nil {
+		t.Fatalf("flush restored attachment: %v", err)
+	}
+	var detachedAt sql.NullString
+	if err := service.db.QueryRow(`SELECT detached_at FROM document_attachments WHERE id = ?`, attachment.ID).Scan(&detachedAt); err != nil {
+		t.Fatalf("detached timestamp after restore: %v", err)
+	}
+	if detachedAt.Valid {
+		t.Fatalf("expected restored attachment to clear detached_at, got %q", detachedAt.String)
+	}
+
+	if _, err := service.UpdateDocumentDraft(doc.ID, emptyDocument(), 4); err != nil {
+		t.Fatalf("draft removed attachment again: %v", err)
+	}
+	if _, err := service.FlushDocument(doc.ID); err != nil {
+		t.Fatalf("flush removed attachment again: %v", err)
+	}
+	oldDetachedAt := time.Now().UTC().Add(-25 * time.Hour).Format(time.RFC3339Nano)
+	if _, err := service.db.Exec(`UPDATE document_attachments SET detached_at = ? WHERE id = ?`, oldDetachedAt, attachment.ID); err != nil {
+		t.Fatalf("age detached attachment: %v", err)
+	}
+	if err := service.PurgeDetachedAttachments(detachedAttachmentGrace); err != nil {
+		t.Fatalf("purge detached attachments: %v", err)
+	}
 	if _, err := service.GetDocumentAttachmentDataURL(attachment.ID); err == nil {
-		t.Fatal("expected unreferenced attachment to be deleted")
+		t.Fatal("expected aged detached attachment to be purged")
 	}
 }
 
