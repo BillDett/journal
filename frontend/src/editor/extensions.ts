@@ -43,7 +43,7 @@ export const editorExtensions = [
   Placeholder.configure({
     placeholder: ({node}) => {
       if (node.type.name === 'heading') return 'Heading'
-      return 'Write...'
+      return ''
     },
   }),
   Typography,
