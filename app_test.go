@@ -101,8 +101,22 @@ func TestBootstrapCreatesTrashAndSettings(t *testing.T) {
 	if settings.AutosaveIntervalMS != defaultAutosaveIntervalMS {
 		t.Fatalf("unexpected autosave interval: %d", settings.AutosaveIntervalMS)
 	}
+	if settings.LibraryWidth != defaultLibraryWidth {
+		t.Fatalf("unexpected library width: %d", settings.LibraryWidth)
+	}
 	if settings.LastDocumentID != "" {
 		t.Fatalf("expected no last document on first run, got %q", settings.LastDocumentID)
+	}
+
+	settings, err = service.UpdateAppSettings(AppSettingsPatch{AutosaveIntervalMS: 1500, LibraryWidth: maxLibraryWidth + 100})
+	if err != nil {
+		t.Fatalf("update settings: %v", err)
+	}
+	if settings.AutosaveIntervalMS != 1500 {
+		t.Fatalf("expected autosave interval 1500, got %d", settings.AutosaveIntervalMS)
+	}
+	if settings.LibraryWidth != maxLibraryWidth {
+		t.Fatalf("expected clamped library width %d, got %d", maxLibraryWidth, settings.LibraryWidth)
 	}
 
 	rows, err := service.db.Query(`PRAGMA table_info(documents)`)

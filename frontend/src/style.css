@@ -156,7 +156,7 @@ button:disabled {
 .main-layout {
   min-height: 0;
   display: grid;
-  grid-template-columns: var(--library-width, 300px) 7px minmax(0, 1fr);
+  grid-template-columns: var(--library-width, 340px) 7px minmax(0, 1fr);
 }
 
 .library-panel {
@@ -255,10 +255,15 @@ body.is-resizing-library {
   display: flex;
   align-items: center;
   gap: 6px;
+  padding-right: 4px;
   border: 1px solid transparent;
   border-radius: 7px;
   color: #38404a;
   position: relative;
+}
+
+.tree-row.has-count {
+  padding-right: 46px;
 }
 
 .tree-row:hover,
@@ -342,6 +347,7 @@ body.is-resizing-library {
 .tree-badge {
   min-width: 22px;
   height: 20px;
+  flex: 0 0 auto;
   border-radius: 999px;
   display: inline-flex;
   align-items: center;
@@ -353,6 +359,11 @@ body.is-resizing-library {
   padding: 0 6px;
 }
 
+.tree-row.has-count .tree-badge {
+  position: absolute;
+  right: 14px;
+}
+
 .tree-row.active .tree-badge,
 .tree-row.selected .tree-badge {
   background: var(--accent-soft);
@@ -360,8 +371,18 @@ body.is-resizing-library {
 }
 
 .tree-actions {
+  position: absolute;
+  right: 4px;
+  top: 50%;
+  transform: translateY(-50%);
   opacity: 0;
-  padding-right: 4px;
+  padding-right: 0;
+  border-radius: 6px;
+  background: inherit;
+}
+
+.tree-row.has-count .tree-actions {
+  right: 42px;
 }
 
 .tree-row:hover .tree-actions,

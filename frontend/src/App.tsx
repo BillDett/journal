@@ -46,6 +46,10 @@ import {EventsOn} from '../wailsjs/runtime/runtime'
 
 type SaveState = 'idle' | 'dirty' | 'saving' | 'saved' | 'error'
 
+const libraryWidthMin = 260
+const libraryWidthDefault = 340
+const libraryWidthMax = 620
+
 type DeleteTarget = {
   item: TreeItem
   inTrash: boolean
@@ -89,7 +93,7 @@ function App() {
     unlocked: false,
     encryptedJournalIds: [],
   })
-  const [libraryWidth, setLibraryWidth] = useState(300)
+  const [libraryWidth, setLibraryWidth] = useState(libraryWidthDefault)
   const autosaveTimer = useRef<number | undefined>(undefined)
   const latestDraft = useRef<{id: string, content: ProseMirrorDoc, version: number} | null>(null)
   const sentDraftVersion = useRef(0)
@@ -139,6 +143,7 @@ function App() {
         if (!live) return
         applyTree(treeResponse.items, treeResponse.trashId)
         setAutosaveInterval(settings.autosaveIntervalMs)
+        setLibraryWidth(clampNumber(settings.libraryWidth || libraryWidthDefault, libraryWidthMin, libraryWidthMax))
         setAppInfo(info)
         setEncryptionStatus(encryption)
         if (settings.lastDocumentId) {
@@ -559,21 +564,34 @@ function App() {
   async function updateAutosaveInterval(value: number) {
     setAutosaveInterval(value)
     try {
-      const response = await api.UpdateAppSettings({autosaveIntervalMs: value})
+      const response = await api.UpdateAppSettings({autosaveIntervalMs: value, libraryWidth})
       setAutosaveInterval(response.autosaveIntervalMs)
+      setLibraryWidth(response.libraryWidth)
       setStatus('Settings updated')
     } catch (error) {
       setLastError(messageFromError(error))
     }
   }
 
+  const persistLibraryWidth = useCallback(async (width: number) => {
+    const nextWidth = clampNumber(Math.round(width), libraryWidthMin, libraryWidthMax)
+    try {
+      const response = await api.UpdateAppSettings({autosaveIntervalMs: autosaveInterval, libraryWidth: nextWidth})
+      setAutosaveInterval(response.autosaveIntervalMs)
+      setLibraryWidth(response.libraryWidth)
+    } catch (error) {
+      setLastError(messageFromError(error))
+    }
+  }, [autosaveInterval])
+
   function beginLibraryResize(event: ReactPointerEvent<HTMLDivElement>) {
     const startX = event.clientX
     const startWidth = libraryWidth
+    let nextWidth = startWidth
     event.currentTarget.setPointerCapture(event.pointerId)
 
     function onPointerMove(moveEvent: PointerEvent) {
-      const nextWidth = Math.min(520, Math.max(220, startWidth + moveEvent.clientX - startX))
+      nextWidth = clampNumber(startWidth + moveEvent.clientX - startX, libraryWidthMin, libraryWidthMax)
       setLibraryWidth(nextWidth)
     }
 
@@ -582,6 +600,7 @@ function App() {
       window.removeEventListener('pointerup', onPointerUp)
       window.removeEventListener('pointercancel', onPointerUp)
       document.body.classList.remove('is-resizing-library')
+      void persistLibraryWidth(nextWidth)
     }
 
     event.preventDefault()
@@ -677,14 +696,22 @@ function App() {
           role="separator"
           aria-label="Resize library pane"
           aria-orientation="vertical"
-          aria-valuemin={220}
-          aria-valuemax={520}
+          aria-valuemin={libraryWidthMin}
+          aria-valuemax={libraryWidthMax}
           aria-valuenow={libraryWidth}
           tabIndex={0}
           onPointerDown={beginLibraryResize}
           onKeyDown={(event) => {
-            if (event.key === 'ArrowLeft') setLibraryWidth((width) => Math.max(220, width - 16))
-            if (event.key === 'ArrowRight') setLibraryWidth((width) => Math.min(520, width + 16))
+            if (event.key === 'ArrowLeft') {
+              const nextWidth = clampNumber(libraryWidth - 16, libraryWidthMin, libraryWidthMax)
+              setLibraryWidth(nextWidth)
+              void persistLibraryWidth(nextWidth)
+            }
+            if (event.key === 'ArrowRight') {
+              const nextWidth = clampNumber(libraryWidth + 16, libraryWidthMin, libraryWidthMax)
+              setLibraryWidth(nextWidth)
+              void persistLibraryWidth(nextWidth)
+            }
           }}
         />
 
@@ -1008,6 +1035,7 @@ function TreeNode(props: TreeNodeProps) {
           invalidDrop ? 'reject-drop' : '',
           isEncryptedJournal ? 'encrypted' : '',
           isLockedJournal ? 'locked' : '',
+          isFolder || isJournal ? 'has-count' : '',
         ].filter(Boolean).join(' ')}
         style={{paddingLeft: 10 + level * 16}}
         role="treeitem"
@@ -1322,6 +1350,10 @@ function toggleSet(values: Set<string>, id: string) {
   if (next.has(id)) next.delete(id)
   else next.add(id)
   return next
+}
+
+function clampNumber(value: number, minValue: number, maxValue: number) {
+  return Math.min(maxValue, Math.max(minValue, value))
 }
 
 export default App

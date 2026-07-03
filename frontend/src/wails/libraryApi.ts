@@ -53,10 +53,12 @@ export type SearchResponse = {
 export type AppSettingsResponse = {
   autosaveIntervalMs: number
   lastDocumentId: string
+  libraryWidth: number
 }
 
 export type AppSettingsPatch = {
   autosaveIntervalMs: number
+  libraryWidth: number
 }
 
 export type AppInfo = {

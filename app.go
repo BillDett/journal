@@ -26,6 +26,10 @@ const (
 
 	defaultAutosaveIntervalMS = 2000
 	settingLastDocumentID     = "last_document_id"
+	settingLibraryWidth       = "library_width"
+	defaultLibraryWidth       = 340
+	minLibraryWidth           = 260
+	maxLibraryWidth           = 620
 
 	defaultAppName    = "Journal"
 	defaultAppVersion = "0.0.0-dev"
@@ -272,10 +276,12 @@ type SearchResponse struct {
 type AppSettingsResponse struct {
 	AutosaveIntervalMS int    `json:"autosaveIntervalMs"`
 	LastDocumentID     string `json:"lastDocumentId"`
+	LibraryWidth       int    `json:"libraryWidth"`
 }
 
 type AppSettingsPatch struct {
 	AutosaveIntervalMS int `json:"autosaveIntervalMs"`
+	LibraryWidth       int `json:"libraryWidth"`
 }
 
 type rowItem struct {
@@ -411,6 +417,9 @@ func (s *JournalService) migrate() error {
 		return err
 	}
 	if err := s.ensureSetting("autosave_interval_ms", fmt.Sprintf("%d", defaultAutosaveIntervalMS)); err != nil {
+		return err
+	}
+	if err := s.ensureSetting(settingLibraryWidth, fmt.Sprintf("%d", defaultLibraryWidth)); err != nil {
 		return err
 	}
 	return s.ensureSetting(settingLastDocumentID, "")
@@ -1263,20 +1272,34 @@ func (s *JournalService) GetAppSettings() (AppSettingsResponse, error) {
 	return AppSettingsResponse{
 		AutosaveIntervalMS: s.autosaveIntervalMS(),
 		LastDocumentID:     s.settingValue(settingLastDocumentID),
+		LibraryWidth:       s.libraryWidth(),
 	}, nil
 }
 
 func (s *JournalService) UpdateAppSettings(settings AppSettingsPatch) (AppSettingsResponse, error) {
-	value := settings.AutosaveIntervalMS
-	if value < 500 {
-		value = defaultAutosaveIntervalMS
+	autosaveIntervalMS := settings.AutosaveIntervalMS
+	if autosaveIntervalMS < 500 {
+		autosaveIntervalMS = defaultAutosaveIntervalMS
 	}
+	libraryWidth := s.libraryWidth()
+	if settings.LibraryWidth > 0 {
+		libraryWidth = clampInt(settings.LibraryWidth, minLibraryWidth, maxLibraryWidth)
+	}
+
 	now := nowString()
 	if _, err := s.db.Exec(
 		`INSERT INTO app_settings (key, value, updated_at)
 		 VALUES ('autosave_interval_ms', ?, ?)
 		 ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
-		fmt.Sprintf("%d", value), now,
+		fmt.Sprintf("%d", autosaveIntervalMS), now,
+	); err != nil {
+		return AppSettingsResponse{}, err
+	}
+	if _, err := s.db.Exec(
+		`INSERT INTO app_settings (key, value, updated_at)
+		 VALUES (?, ?, ?)
+		 ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+		settingLibraryWidth, fmt.Sprintf("%d", libraryWidth), now,
 	); err != nil {
 		return AppSettingsResponse{}, err
 	}
@@ -1678,6 +1701,29 @@ func (s *JournalService) autosaveIntervalMS() int {
 		return defaultAutosaveIntervalMS
 	}
 	return parsed
+}
+
+func (s *JournalService) libraryWidth() int {
+	var value string
+	err := s.db.QueryRow(`SELECT value FROM app_settings WHERE key = ?`, settingLibraryWidth).Scan(&value)
+	if err != nil {
+		return defaultLibraryWidth
+	}
+	var parsed int
+	if _, err := fmt.Sscanf(value, "%d", &parsed); err != nil {
+		return defaultLibraryWidth
+	}
+	return clampInt(parsed, minLibraryWidth, maxLibraryWidth)
+}
+
+func clampInt(value, minValue, maxValue int) int {
+	if value < minValue {
+		return minValue
+	}
+	if value > maxValue {
+		return maxValue
+	}
+	return value
 }
 
 func (s *JournalService) pendingIDsOlderThan(age time.Duration) []string {
