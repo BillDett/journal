@@ -15,6 +15,7 @@ import {
   Highlighter,
   Italic,
   KeyRound,
+  Link2,
   List,
   ListOrdered,
   Lock,
@@ -42,7 +43,7 @@ import {
   type TreeItem,
 } from './wails/libraryApi'
 import appIcon from './assets/appicon.png'
-import {EventsOn} from '../wailsjs/runtime/runtime'
+import {BrowserOpenURL, EventsOn} from '../wailsjs/runtime/runtime'
 
 type SaveState = 'idle' | 'dirty' | 'saving' | 'saved' | 'error'
 
@@ -56,6 +57,13 @@ type DeleteTarget = {
 } | null
 
 type DecryptTarget = TreeItem | null
+
+type LinkPopoverState = {
+  x: number
+  y: number
+  from: number
+  to: number
+}
 
 type EncryptionDialogState =
   | {mode: 'create', journalId: string}
@@ -827,6 +835,8 @@ type EditorPaneProps = {
 
 function EditorPane({document, focusTitle = false, saveState, status, onDraft, onFlush, onRename, onTitleFocused, onEditorReady}: EditorPaneProps) {
   const [title, setTitle] = useState(document.title)
+  const [linkPopover, setLinkPopover] = useState<LinkPopoverState | null>(null)
+  const [canCreateLink, setCanCreateLink] = useState(false)
   const titleInputRef = useRef<HTMLInputElement | null>(null)
   const editorRef = useRef<Editor | null>(null)
   const draftTimer = useRef<number | undefined>(undefined)
@@ -858,10 +868,44 @@ function EditorPane({document, focusTitle = false, saveState, status, onDraft, o
       attributes: {
         class: 'editor-page',
       },
+      handleClick: (_view, _pos, event) => {
+        if (!event.metaKey && !event.ctrlKey) return false
+        const target = event.target
+        if (!(target instanceof Element)) return false
+        const link = target.closest('a[href]')
+        const href = link?.getAttribute('href')
+        if (!href) return false
+
+        event.preventDefault()
+        openExternalLink(href)
+        return true
+      },
+      handleDOMEvents: {
+        contextmenu: (view, event) => {
+          const {from, to} = view.state.selection
+          if (from === to) return false
+          const position = view.posAtCoords({left: event.clientX, top: event.clientY})
+          if (!position || position.pos < from || position.pos > to) return false
+
+          event.preventDefault()
+          view.focus()
+          setLinkPopover({
+            x: event.clientX,
+            y: event.clientY,
+            from,
+            to,
+          })
+          return true
+        },
+      },
     },
     onCreate: ({editor}) => {
       editorRef.current = editor
+      setCanCreateLink(!editor.state.selection.empty)
       onEditorReadyRef.current(editor)
+    },
+    onSelectionUpdate: ({editor}) => {
+      setCanCreateLink(!editor.state.selection.empty)
     },
     onUpdate: ({editor}) => {
       editorRef.current = editor
@@ -904,6 +948,38 @@ function EditorPane({document, focusTitle = false, saveState, status, onDraft, o
     onRename(next)
   }
 
+  function openCreateLinkPopover() {
+    if (!editor || editor.state.selection.empty) return
+    const {from, to} = editor.state.selection
+    const start = editor.view.coordsAtPos(from)
+    const end = editor.view.coordsAtPos(to)
+    setLinkPopover({
+      x: Math.min((start.left + end.right) / 2, window.innerWidth - 24),
+      y: Math.max(Math.min(start.bottom + 8, window.innerHeight - 24), 24),
+      from,
+      to,
+    })
+  }
+
+  function closeLinkPopover() {
+    setLinkPopover(null)
+    editor?.commands.focus()
+  }
+
+  function submitLink(url: string) {
+    if (!editor || !linkPopover) return
+    const href = normalizeLinkURL(url)
+    if (!href) return
+
+    editor
+      .chain()
+      .focus()
+      .setTextSelection({from: linkPopover.from, to: linkPopover.to})
+      .setLink({href})
+      .run()
+    setLinkPopover(null)
+  }
+
   return (
     <>
       <div className="document-head">
@@ -922,11 +998,19 @@ function EditorPane({document, focusTitle = false, saveState, status, onDraft, o
           }}
           aria-label="Document title"
         />
-        <EditorToolbar editor={editor}/>
+        <EditorToolbar editor={editor} canCreateLink={canCreateLink} onCreateLink={openCreateLinkPopover}/>
       </div>
       <div className="paper-scroll" onBlur={flushEditor}>
         <EditorContent editor={editor}/>
       </div>
+      {linkPopover ? (
+        <LinkCreatePopover
+          x={linkPopover.x}
+          y={linkPopover.y}
+          onSubmit={submitLink}
+          onCancel={closeLinkPopover}
+        />
+      ) : null}
       <footer className="editor-status">
         <SaveIndicator state={saveState} label={status}/>
         <span className="document-dates">
@@ -939,6 +1023,67 @@ function EditorPane({document, focusTitle = false, saveState, status, onDraft, o
   )
 }
 
+type LinkCreatePopoverProps = {
+  x: number
+  y: number
+  onSubmit: (url: string) => void
+  onCancel: () => void
+}
+
+function LinkCreatePopover({x, y, onSubmit, onCancel}: LinkCreatePopoverProps) {
+  const [url, setURL] = useState('')
+  const [error, setError] = useState('')
+  const inputRef = useRef<HTMLInputElement | null>(null)
+
+  useEffect(() => {
+    inputRef.current?.focus()
+
+    function handlePointerDown(event: MouseEvent) {
+      const target = event.target
+      if (target instanceof Element && target.closest('.link-popover')) return
+      onCancel()
+    }
+
+    document.addEventListener('pointerdown', handlePointerDown)
+    return () => document.removeEventListener('pointerdown', handlePointerDown)
+  }, [onCancel])
+
+  return (
+    <form
+      className="link-popover"
+      style={{left: x, top: y}}
+      onSubmit={(event) => {
+        event.preventDefault()
+        const href = normalizeLinkURL(url)
+        if (!href) {
+          setError('Enter a valid URL.')
+          return
+        }
+        onSubmit(href)
+      }}
+      onKeyDown={(event) => {
+        if (event.key === 'Escape') {
+          event.preventDefault()
+          onCancel()
+        }
+      }}
+    >
+      <input
+        ref={inputRef}
+        value={url}
+        onChange={(event) => {
+          setURL(event.target.value)
+          setError('')
+        }}
+        placeholder="https://example.com"
+        aria-label="Link URL"
+      />
+      <button type="submit">Create Link</button>
+      {error ? <span className="link-popover-error">{error}</span> : null}
+    </form>
+  )
+}
+
 function formatTimestamp(value: string) {
   if (!value) return 'Unknown'
   const date = new Date(value)
@@ -946,13 +1091,44 @@ function formatTimestamp(value: string) {
   return new Intl.DateTimeFormat(undefined, {dateStyle: 'medium', timeStyle: 'short'}).format(date)
 }
 
-type EditorToolbarProps = {
-  editor: Editor | null
-  disabled?: boolean
+function normalizeLinkURL(value: string) {
+  const trimmed = value.trim()
+  if (!trimmed) return ''
+
+  const hasScheme = /^[a-z][a-z0-9+.-]*:\/\//i.test(trimmed) || /^(mailto|tel):/i.test(trimmed)
+  const isEmailAddress = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(trimmed)
+  const urlText = hasScheme ? trimmed : isEmailAddress ? `mailto:${trimmed}` : `https://${trimmed}`
+
+  try {
+    const url = new URL(urlText)
+    if (!['http:', 'https:', 'mailto:', 'tel:'].includes(url.protocol)) return ''
+    return url.toString()
+  } catch {
+    return ''
+  }
 }
 
-function EditorToolbar({editor, disabled = false}: EditorToolbarProps) {
+function openExternalLink(value: string) {
+  const href = normalizeLinkURL(value)
+  if (!href) return
+
+  if ('runtime' in window) {
+    BrowserOpenURL(href)
+    return
+  }
+  window.open(href, '_blank', 'noopener,noreferrer')
+}
+
+type EditorToolbarProps = {
+  editor: Editor | null
+  canCreateLink: boolean
+  disabled?: boolean
+  onCreateLink: () => void
+}
+
+function EditorToolbar({editor, canCreateLink, disabled = false, onCreateLink}: EditorToolbarProps) {
   const blocked = disabled || !editor
+  const linkBlocked = blocked || !canCreateLink
   return (
     <div className="format-toolbar" aria-label="Formatting">
       <Tool disabled={blocked} active={editor?.isActive('heading', {level: 1})} label="Heading" onClick={() => editor?.chain().focus().toggleHeading({level: 1}).run()}><Type size={16}/></Tool>
@@ -961,6 +1137,7 @@ function EditorToolbar({editor, disabled = false}: EditorToolbarProps) {
       <Tool disabled={blocked} active={editor?.isActive('underline')} label="Underline" onClick={() => editor?.chain().focus().toggleUnderline().run()}><UnderlineIcon size={16}/></Tool>
       <Tool disabled={blocked} active={editor?.isActive('strike')} label="Strike" onClick={() => editor?.chain().focus().toggleStrike().run()}><Strikethrough size={16}/></Tool>
       <Tool disabled={blocked} active={editor?.isActive('highlight')} label="Highlight" onClick={() => editor?.chain().focus().toggleHighlight({color: '#fff1a8'}).run()}><Highlighter size={16}/></Tool>
+      <Tool disabled={linkBlocked} active={editor?.isActive('link')} label="Create link" onClick={onCreateLink}><Link2 size={16}/></Tool>
       <span className="toolbar-divider"/>
       <Tool disabled={blocked} active={editor?.isActive('bulletList')} label="Bullet list" onClick={() => editor?.chain().focus().toggleBulletList().run()}><List size={16}/></Tool>
       <Tool disabled={blocked} active={editor?.isActive('orderedList')} label="Numbered list" onClick={() => editor?.chain().focus().toggleOrderedList().run()}><ListOrdered size={16}/></Tool>

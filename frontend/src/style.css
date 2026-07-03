@@ -526,7 +526,51 @@ body.is-resizing-library {
 }
 
 .editor-page a {
-  color: #126f91;
+  color: #0b63ce;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+
+.link-popover {
+  position: fixed;
+  z-index: 40;
+  display: grid;
+  grid-template-columns: minmax(220px, 1fr) auto;
+  gap: 8px;
+  width: min(420px, calc(100vw - 32px));
+  padding: 10px;
+  border: 1px solid #c6d1dc;
+  border-radius: 8px;
+  background: #ffffff;
+  box-shadow: 0 12px 34px rgba(30, 42, 56, 0.2);
+  transform: translate(-50%, 0);
+}
+
+.link-popover input {
+  min-width: 0;
+  height: 34px;
+  border: 1px solid #c5ced8;
+  border-radius: 6px;
+  padding: 0 10px;
+  color: var(--ink);
+  font: inherit;
+}
+
+.link-popover button {
+  height: 34px;
+  border: 0;
+  border-radius: 6px;
+  padding: 0 12px;
+  background: var(--accent);
+  color: #ffffff;
+  font-weight: 700;
+}
+
+.link-popover-error {
+  grid-column: 1 / -1;
+  color: #a83232;
+  font-size: 12px;
 }
 
 .editor-page blockquote {
