@@ -3,7 +3,7 @@ import {EditorContent, useEditor} from '@tiptap/react'
 import type {Editor} from '@tiptap/react'
 import {
   Bold,
-  Book,
+  BookOpenText,
   BookPlus,
   CheckSquare,
   ChevronDown,
@@ -20,12 +20,14 @@ import {
   List,
   ListOrdered,
   Lock,
+  Minus,
   Plus,
   Redo2,
   Search,
   Settings,
   Strikethrough,
   Table2,
+  TableProperties,
   Trash2,
   Type,
   Underline as UnderlineIcon,
@@ -863,6 +865,7 @@ function EditorPane({document, focusTitle = false, saveState, status, onDraft, o
   const [title, setTitle] = useState(document.title)
   const [linkPopover, setLinkPopover] = useState<LinkPopoverState | null>(null)
   const [canCreateLink, setCanCreateLink] = useState(false)
+  const [isTableActive, setIsTableActive] = useState(false)
   const titleInputRef = useRef<HTMLInputElement | null>(null)
   const imageInputRef = useRef<HTMLInputElement | null>(null)
   const editorRef = useRef<Editor | null>(null)
@@ -885,6 +888,11 @@ function EditorPane({document, focusTitle = false, saveState, status, onDraft, o
     pendingDraft.current = false
     const content = editor.getJSON() as ProseMirrorDoc
     await onDraftRef.current(content)
+  }, [])
+
+  const updateEditorControls = useCallback((editor: Editor) => {
+    setCanCreateLink(!editor.state.selection.empty)
+    setIsTableActive(editor.isActive('table'))
   }, [])
 
   const editor = useEditor({
@@ -941,14 +949,15 @@ function EditorPane({document, focusTitle = false, saveState, status, onDraft, o
     },
     onCreate: ({editor}) => {
       editorRef.current = editor
-      setCanCreateLink(!editor.state.selection.empty)
+      updateEditorControls(editor)
       onEditorReadyRef.current(editor)
     },
     onSelectionUpdate: ({editor}) => {
-      setCanCreateLink(!editor.state.selection.empty)
+      updateEditorControls(editor)
     },
     onUpdate: ({editor}) => {
       editorRef.current = editor
+      updateEditorControls(editor)
       pendingDraft.current = true
       window.clearTimeout(draftTimer.current)
       draftTimer.current = window.setTimeout(() => {
@@ -1097,6 +1106,7 @@ function EditorPane({document, focusTitle = false, saveState, status, onDraft, o
         <EditorToolbar
           editor={editor}
           canCreateLink={canCreateLink}
+          isTableActive={isTableActive}
           spacingPreset={document.spacingPreset ?? 'compact'}
           onCreateLink={openCreateLinkPopover}
           onInsertImage={openImageFilePicker}
@@ -1244,6 +1254,7 @@ function openExternalLink(value: string) {
 type EditorToolbarProps = {
   editor: Editor | null
   canCreateLink: boolean
+  isTableActive: boolean
   disabled?: boolean
   spacingPreset: SpacingPreset
   onCreateLink: () => void
@@ -1251,39 +1262,70 @@ type EditorToolbarProps = {
   onSpacingPresetChange: (spacingPreset: SpacingPreset) => void
 }
 
-function EditorToolbar({editor, canCreateLink, disabled = false, spacingPreset, onCreateLink, onInsertImage, onSpacingPresetChange}: EditorToolbarProps) {
+function EditorToolbar({editor, canCreateLink, isTableActive, disabled = false, spacingPreset, onCreateLink, onInsertImage, onSpacingPresetChange}: EditorToolbarProps) {
   const blocked = disabled || !editor
   const linkBlocked = blocked || !canCreateLink
+  const insertTable = () => {
+    editor?.chain().focus().insertTable({rows: 3, cols: 3, withHeaderRow: true}).setTableWidthPercent(75).run()
+  }
   return (
     <div className="format-toolbar" aria-label="Formatting">
-      <Tool disabled={blocked} active={editor?.isActive('heading', {level: 1})} label="Heading" onClick={() => editor?.chain().focus().toggleHeading({level: 1}).run()}><Type size={16}/></Tool>
-      <Tool disabled={blocked} active={editor?.isActive('bold')} label="Bold" onClick={() => editor?.chain().focus().toggleBold().run()}><Bold size={16}/></Tool>
-      <Tool disabled={blocked} active={editor?.isActive('italic')} label="Italic" onClick={() => editor?.chain().focus().toggleItalic().run()}><Italic size={16}/></Tool>
-      <Tool disabled={blocked} active={editor?.isActive('underline')} label="Underline" onClick={() => editor?.chain().focus().toggleUnderline().run()}><UnderlineIcon size={16}/></Tool>
-      <Tool disabled={blocked} active={editor?.isActive('strike')} label="Strike" onClick={() => editor?.chain().focus().toggleStrike().run()}><Strikethrough size={16}/></Tool>
-      <Tool disabled={blocked} active={editor?.isActive('highlight')} label="Highlight" onClick={() => editor?.chain().focus().toggleHighlight({color: '#fff1a8'}).run()}><Highlighter size={16}/></Tool>
-      <Tool disabled={linkBlocked} active={editor?.isActive('link')} label="Create link" onClick={onCreateLink}><Link2 size={16}/></Tool>
-      <Tool disabled={blocked} label="Insert image" onClick={onInsertImage}><ImageIcon size={16}/></Tool>
-      <label className="spacing-control" title="Paragraph spacing">
-        <span>Spacing</span>
-        <select
-          value={spacingPreset}
-          disabled={blocked}
-          onChange={(event) => onSpacingPresetChange(event.target.value as SpacingPreset)}
-        >
-          <option value="compact">Compact</option>
-          <option value="normal">Normal</option>
-          <option value="relaxed">Relaxed</option>
-        </select>
-      </label>
+      <div className="toolbar-group">
+        <Tool disabled={blocked} active={editor?.isActive('heading', {level: 1})} label="Heading" onClick={() => editor?.chain().focus().toggleHeading({level: 1}).run()}><Type size={16}/></Tool>
+        <Tool disabled={blocked} active={editor?.isActive('bold')} label="Bold" onClick={() => editor?.chain().focus().toggleBold().run()}><Bold size={16}/></Tool>
+        <Tool disabled={blocked} active={editor?.isActive('italic')} label="Italic" onClick={() => editor?.chain().focus().toggleItalic().run()}><Italic size={16}/></Tool>
+        <Tool disabled={blocked} active={editor?.isActive('underline')} label="Underline" onClick={() => editor?.chain().focus().toggleUnderline().run()}><UnderlineIcon size={16}/></Tool>
+        <Tool disabled={blocked} active={editor?.isActive('strike')} label="Strike" onClick={() => editor?.chain().focus().toggleStrike().run()}><Strikethrough size={16}/></Tool>
+        <Tool disabled={blocked} active={editor?.isActive('highlight')} label="Highlight" onClick={() => editor?.chain().focus().toggleHighlight({color: '#fff1a8'}).run()}><Highlighter size={16}/></Tool>
+        <Tool disabled={linkBlocked} active={editor?.isActive('link')} label="Create link" onClick={onCreateLink}><Link2 size={16}/></Tool>
+        <Tool disabled={blocked} label="Insert image" onClick={onInsertImage}><ImageIcon size={16}/></Tool>
+        <label className="spacing-control" title="Paragraph spacing">
+          <span>Spacing</span>
+          <select
+            value={spacingPreset}
+            disabled={blocked}
+            onChange={(event) => onSpacingPresetChange(event.target.value as SpacingPreset)}
+          >
+            <option value="compact">Compact</option>
+            <option value="normal">Normal</option>
+            <option value="relaxed">Relaxed</option>
+          </select>
+        </label>
+        <span className="toolbar-divider"/>
+        <Tool disabled={blocked} active={editor?.isActive('bulletList')} label="Bullet list" onClick={() => editor?.chain().focus().toggleBulletList().run()}><List size={16}/></Tool>
+        <Tool disabled={blocked} active={editor?.isActive('orderedList')} label="Numbered list" onClick={() => editor?.chain().focus().toggleOrderedList().run()}><ListOrdered size={16}/></Tool>
+        <Tool disabled={blocked} active={editor?.isActive('taskList')} label="Task list" onClick={() => editor?.chain().focus().toggleTaskList().run()}><CheckSquare size={16}/></Tool>
+        <Tool disabled={blocked} active={isTableActive} label="Insert table" onClick={insertTable}><Table2 size={16}/></Tool>
+        <span className="toolbar-divider"/>
+        <Tool disabled={blocked} label="Undo" onClick={() => editor?.chain().focus().undo().run()}><Undo2 size={16}/></Tool>
+        <Tool disabled={blocked} label="Redo" onClick={() => editor?.chain().focus().redo().run()}><Redo2 size={16}/></Tool>
+      </div>
+      {isTableActive ? <TableToolbar editor={editor} disabled={blocked}/> : null}
+    </div>
+  )
+}
+
+type TableToolbarProps = {
+  disabled: boolean
+  editor: Editor | null
+}
+
+function TableToolbar({editor, disabled}: TableToolbarProps) {
+  const blocked = disabled || !editor
+  return (
+    <div className="table-toolbar" aria-label="Table tools">
+      <span className="table-toolbar-label">Row</span>
+      <Tool disabled={blocked} label="Add row below" onClick={() => editor?.chain().focus().addRowAfter().run()}><Plus size={16}/></Tool>
+      <Tool disabled={blocked} label="Delete row" onClick={() => editor?.chain().focus().deleteRow().run()}><Minus size={16}/></Tool>
       <span className="toolbar-divider"/>
-      <Tool disabled={blocked} active={editor?.isActive('bulletList')} label="Bullet list" onClick={() => editor?.chain().focus().toggleBulletList().run()}><List size={16}/></Tool>
-      <Tool disabled={blocked} active={editor?.isActive('orderedList')} label="Numbered list" onClick={() => editor?.chain().focus().toggleOrderedList().run()}><ListOrdered size={16}/></Tool>
-      <Tool disabled={blocked} active={editor?.isActive('taskList')} label="Task list" onClick={() => editor?.chain().focus().toggleTaskList().run()}><CheckSquare size={16}/></Tool>
-      <Tool disabled={blocked} label="Table" onClick={() => editor?.chain().focus().insertTable({rows: 3, cols: 3, withHeaderRow: true}).run()}><Table2 size={16}/></Tool>
+      <span className="table-toolbar-label">Column</span>
+      <Tool disabled={blocked} label="Add column right" onClick={() => editor?.chain().focus().addColumnAfter().run()}><Plus size={16}/></Tool>
+      <Tool disabled={blocked} label="Delete column" onClick={() => editor?.chain().focus().deleteColumn().run()}><Minus size={16}/></Tool>
       <span className="toolbar-divider"/>
-      <Tool disabled={blocked} label="Undo" onClick={() => editor?.chain().focus().undo().run()}><Undo2 size={16}/></Tool>
-      <Tool disabled={blocked} label="Redo" onClick={() => editor?.chain().focus().redo().run()}><Redo2 size={16}/></Tool>
+      <span className="table-toolbar-label">Table</span>
+      <Tool disabled={blocked} label="Toggle header row" onClick={() => editor?.chain().focus().toggleHeaderRow().run()}><TableProperties size={16}/></Tool>
+      <Tool disabled={blocked} label="Toggle header column" onClick={() => editor?.chain().focus().toggleHeaderColumn().run()}><Table2 size={16}/></Tool>
+      <Tool disabled={blocked} label="Delete table" onClick={() => editor?.chain().focus().deleteTable().run()}><Trash2 size={16}/></Tool>
     </div>
   )
 }
@@ -1403,7 +1445,7 @@ function TreeNode(props: TreeNodeProps) {
         }} title={isExpanded ? 'Collapse' : 'Expand'}>
           {isContainer ? (isExpanded ? <ChevronDown size={15}/> : <ChevronRight size={15}/>) : <span/>}
         </button>
-        {isTrash ? <Trash2 size={16}/> : isEncryptedJournal ? <Lock size={16}/> : isJournal ? <Book size={16}/> : isFolder ? <Folder size={16}/> : <FileText size={16}/>}
+        {isTrash ? <Trash2 size={16}/> : isEncryptedJournal ? <Lock size={16}/> : isJournal ? <BookOpenText size={16}/> : isFolder ? <Folder size={16}/> : <FileText size={16}/>}
 
         {renamingId === item.id ? (
           <input

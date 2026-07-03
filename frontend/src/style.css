@@ -94,6 +94,30 @@ button:disabled {
   min-width: 0;
 }
 
+.format-toolbar {
+  flex-wrap: wrap;
+}
+
+.toolbar-group,
+.table-toolbar {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.table-toolbar {
+  margin-left: 4px;
+  padding-left: 10px;
+  border-left: 1px solid var(--line);
+}
+
+.table-toolbar-label {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
 .icon-button,
 .tool,
 .mini-actions button,
@@ -706,13 +730,104 @@ body.is-resizing-library {
 
 .editor-page table {
   border-collapse: collapse;
-  min-width: 520px;
+  table-layout: fixed;
+  width: 100%;
+  min-width: 100%;
+  overflow: hidden;
+  outline: 1px solid #cfd6de;
+  outline-offset: -1px;
+}
+
+.editor-page .tableWrapper {
+  box-sizing: border-box;
+  position: relative;
+  overflow-x: auto;
+  max-width: 100%;
+}
+
+.editor-page .tableWrapper::after {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 18;
+  width: 10px;
+  content: "";
+  border-right: 2px solid transparent;
+  cursor: ew-resize;
+}
+
+.editor-page .tableWrapper:hover::after,
+body.is-resizing-table .editor-page .tableWrapper::after {
+  border-right-color: rgba(11, 98, 88, 0.46);
+}
+
+body.is-resizing-table,
+body.is-resizing-table * {
+  cursor: ew-resize;
+  user-select: none;
 }
 
 .editor-page td,
 .editor-page th {
+  box-sizing: border-box;
+  position: relative;
   border: 1px solid #cfd6de;
   padding: 8px 10px;
+  vertical-align: top;
+  caret-color: #252525;
+}
+
+.editor-page td:not([data-colwidth]):not(.column-resize-dragging),
+.editor-page th:not([data-colwidth]):not(.column-resize-dragging) {
+  min-width: 56px;
+}
+
+.editor-page .column-resize-handle {
+  position: absolute;
+  top: 0;
+  right: -3px;
+  bottom: 0;
+  z-index: 20;
+  width: 6px;
+  background: rgba(11, 98, 88, 0.24);
+  cursor: col-resize;
+  pointer-events: none;
+}
+
+.editor-page.resize-cursor,
+.editor-page.resize-cursor * {
+  cursor: col-resize;
+}
+
+.editor-page .column-resize-dragging {
+  background: rgba(11, 98, 88, 0.04);
+}
+
+.editor-page td p,
+.editor-page th p {
+  min-height: 1.28em;
+  margin: 0;
+  caret-color: #252525;
+}
+
+.editor-page td p.is-empty::before,
+.editor-page th p.is-empty::before {
+  content: "\00a0";
+  float: none;
+  display: inline-block;
+  width: 0;
+  height: auto;
+  color: transparent;
+}
+
+.editor-page .selectedCell::after {
+  position: absolute;
+  z-index: 2;
+  inset: 0;
+  content: "";
+  background: rgba(126, 169, 255, 0.22);
+  pointer-events: none;
 }
 
 .editor-page ul[data-type="taskList"] {

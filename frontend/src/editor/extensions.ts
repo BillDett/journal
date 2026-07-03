@@ -2,7 +2,6 @@ import CharacterCount from '@tiptap/extension-character-count'
 import Highlight from '@tiptap/extension-highlight'
 import Link from '@tiptap/extension-link'
 import Placeholder from '@tiptap/extension-placeholder'
-import {Table} from '@tiptap/extension-table'
 import TableCell from '@tiptap/extension-table-cell'
 import TableHeader from '@tiptap/extension-table-header'
 import TableRow from '@tiptap/extension-table-row'
@@ -15,6 +14,7 @@ import StarterKit from '@tiptap/starter-kit'
 import {AttachmentImage} from './attachmentImage'
 import {BlockIndent} from './blockIndent'
 import {ListNormalization} from './listNormalization'
+import {ResizableTable} from './resizableTable'
 
 export const editorExtensions = [
   StarterKit.configure({
@@ -38,8 +38,11 @@ export const editorExtensions = [
   TaskItem.configure({
     nested: true,
   }),
-  Table.configure({
+  ResizableTable.configure({
     resizable: true,
+    cellMinWidth: 56,
+    handleWidth: 6,
+    lastColumnResizable: false,
   }),
   TableRow,
   TableHeader,

@@ -18,6 +18,7 @@ Journal is a local desktop writing application that just lets you write and orga
 - Full-text search across folder titles, document titles, and saved document body text
 - Ordered and bulleted outlines
 - Inline image support
+- Table support
 - Strong encryption per-Journal, locked and unlocked via a single master password.
 
 ## Requirements
