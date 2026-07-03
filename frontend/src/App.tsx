@@ -77,6 +77,7 @@ function App() {
   const [lastError, setLastError] = useState('')
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [aboutOpen, setAboutOpen] = useState(false)
+  const [titleFocusDocumentId, setTitleFocusDocumentId] = useState('')
   const [appInfo, setAppInfo] = useState<AppInfo>({
     name: 'Journal',
     version: '0.0.0-dev',
@@ -296,6 +297,7 @@ function App() {
     if (activeDoc?.id === id) return
     if (!(await flushActive())) return
     try {
+      setTitleFocusDocumentId('')
       const response = await api.OpenDocument(id)
       showDocument(response, 'Opened')
     } catch (error) {
@@ -326,8 +328,8 @@ function App() {
     if (!(await flushActive())) return
     try {
       const response = await api.CreateDocument(parentId)
+      setTitleFocusDocumentId(response.id)
       showDocument(response, 'Created document')
-      setRenamingId(response.id)
     } catch (error) {
       setLastError(messageFromError(error))
     }
@@ -739,11 +741,13 @@ function App() {
             <EditorPane
               key={activeDoc.id}
               document={activeDoc}
+              focusTitle={titleFocusDocumentId === activeDoc.id}
               saveState={saveState}
               status={status}
               onDraft={updateActiveDraft}
               onFlush={() => void flushActive()}
               onRename={(title) => void renameItem(activeDoc.id, title)}
+              onTitleFocused={() => setTitleFocusDocumentId('')}
               onEditorReady={(editor) => {
                 ;(window as unknown as {journalEditor?: Editor}).journalEditor = editor
               }}
@@ -811,16 +815,19 @@ function App() {
 
 type EditorPaneProps = {
   document: DocumentResponse
+  focusTitle?: boolean
   saveState: SaveState
   status: string
   onDraft: (content: ProseMirrorDoc) => Promise<void>
   onFlush: () => void
   onRename: (title: string) => void
+  onTitleFocused?: () => void
   onEditorReady: (editor: Editor) => void
 }
 
-function EditorPane({document, saveState, status, onDraft, onFlush, onRename, onEditorReady}: EditorPaneProps) {
+function EditorPane({document, focusTitle = false, saveState, status, onDraft, onFlush, onRename, onTitleFocused, onEditorReady}: EditorPaneProps) {
   const [title, setTitle] = useState(document.title)
+  const titleInputRef = useRef<HTMLInputElement | null>(null)
   const editorRef = useRef<Editor | null>(null)
   const draftTimer = useRef<number | undefined>(undefined)
   const pendingDraft = useRef(false)
@@ -846,7 +853,7 @@ function EditorPane({document, saveState, status, onDraft, onFlush, onRename, on
   const editor = useEditor({
     extensions: editorExtensions,
     content: document.content,
-    autofocus: 'end',
+    autofocus: focusTitle ? false : 'end',
     editorProps: {
       attributes: {
         class: 'editor-page',
@@ -870,6 +877,16 @@ function EditorPane({document, saveState, status, onDraft, onFlush, onRename, on
     setTitle(document.title)
   }, [document.id, document.title])
 
+  useEffect(() => {
+    if (!focusTitle) return
+    const titleInput = titleInputRef.current
+    if (!titleInput) return
+
+    titleInput.focus()
+    titleInput.select()
+    onTitleFocused?.()
+  }, [focusTitle, onTitleFocused])
+
   useEffect(() => () => window.clearTimeout(draftTimer.current), [])
 
   function flushEditor() {
@@ -891,6 +908,7 @@ function EditorPane({document, saveState, status, onDraft, onFlush, onRename, on
     <>
       <div className="document-head">
         <input
+          ref={titleInputRef}
           className="title-input"
           value={title}
           onChange={(event) => setTitle(event.target.value)}
