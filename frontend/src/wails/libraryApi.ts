@@ -114,6 +114,9 @@ type BackendAPI = {
   ChangeMasterPassword: (currentPassword: string, newPassword: string) => Promise<EncryptionStatusResponse>
   EncryptJournal: (journalId: string) => Promise<TreeResponse>
   DecryptJournal: (journalId: string) => Promise<TreeResponse>
+  ExportJournalDirectory: (journalId: string) => Promise<void>
+  ImportMarkdownDirectory: () => Promise<ItemResponse>
+  SetSelectedJournalForMenu: (journalId: string) => Promise<void>
   GetAppSettings: () => Promise<AppSettingsResponse>
   UpdateAppSettings: (settings: AppSettingsPatch) => Promise<AppSettingsResponse>
 }
@@ -163,6 +166,9 @@ function missingBackend(): BackendAPI {
     ChangeMasterPassword: fail,
     EncryptJournal: fail,
     DecryptJournal: fail,
+    ExportJournalDirectory: fail,
+    ImportMarkdownDirectory: fail,
+    SetSelectedJournalForMenu: fail,
     GetAppSettings: fail,
     UpdateAppSettings: fail,
   }

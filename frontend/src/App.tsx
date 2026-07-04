@@ -110,6 +110,7 @@ function App() {
   })
   const [libraryWidth, setLibraryWidth] = useState(libraryWidthDefault)
   const autosaveTimer = useRef<number | undefined>(undefined)
+  const selectedJournalIdRef = useRef('')
   const latestDraft = useRef<{id: string, content: ProseMirrorDoc, version: number} | null>(null)
   const sentDraftVersion = useRef(0)
   const draftVersion = useRef(0)
@@ -119,6 +120,12 @@ function App() {
   const journalCount = useMemo(() => tree.filter((item) => item.kind === 'journal').length, [tree])
   const defaultJournalId = tree.find((item) => item.kind === 'journal')?.id ?? ''
   const draggedItem = draggedId ? flattened.find((item) => item.id === draggedId) : undefined
+  const selectedItem = selectedItemId ? flattened.find((item) => item.id === selectedItemId) ?? null : null
+  const selectedJournal = selectedItem?.kind === 'journal' ? selectedItem : null
+  const creationParentId = useMemo(
+    () => creationParentFor(flattened, selectedItemId, defaultJournalId, trashId),
+    [defaultJournalId, flattened, selectedItemId, trashId],
+  )
 
   const applyTree = useCallback((items: TreeItem[], nextTrashId: string) => {
     setTree(orderTree(items, nextTrashId))
@@ -138,7 +145,7 @@ function App() {
   useEffect(() => () => window.clearTimeout(autosaveTimer.current), [])
 
   useEffect(() => {
-    if (!lastError.toLowerCase().includes('invalid master password')) return undefined
+    if (!shouldAutoDismissError(lastError)) return undefined
     const handle = window.setTimeout(() => {
       setLastError((current) => current === lastError ? '' : current)
     }, 5000)
@@ -149,6 +156,11 @@ function App() {
     if (!('runtime' in window)) return undefined
     return EventsOn('journal:show-about', () => setAboutOpen(true))
   }, [])
+
+  useEffect(() => {
+    selectedJournalIdRef.current = selectedJournal?.id ?? ''
+    void api.SetSelectedJournalForMenu(selectedJournal?.id ?? '')
+  }, [selectedJournal?.id])
 
   useEffect(() => {
     let live = true
@@ -392,6 +404,44 @@ function App() {
       setLastError(messageFromError(error))
     }
   }
+
+  async function exportJournalById(journalId: string) {
+    if (!journalId) return
+    try {
+      await api.ExportJournalDirectory(journalId)
+      setStatus('Exported journal')
+    } catch (error) {
+      setLastError(messageFromError(error))
+    }
+  }
+
+  async function importJournal() {
+    if (!(await flushActive())) return
+    try {
+      const response = await api.ImportMarkdownDirectory()
+      if (!response.item?.id) return
+      await refreshVisibleTree(response.tree.items, response.tree.trashId)
+      setSelectedItemId(response.item.id)
+      setExpanded((current) => new Set([...current, response.item.id]))
+      setStatus('Imported journal')
+    } catch (error) {
+      setLastError(messageFromError(error))
+    }
+  }
+
+  useEffect(() => {
+    if (!('runtime' in window)) return undefined
+    const offExport = EventsOn('journal:menu-export-journal', (journalId?: string) => {
+      void exportJournalById(typeof journalId === 'string' && journalId ? journalId : selectedJournalIdRef.current)
+    })
+    const offImport = EventsOn('journal:menu-import-journal', () => {
+      void importJournal()
+    })
+    return () => {
+      offExport?.()
+      offImport?.()
+    }
+  }, [flushActive])
 
   async function renameItem(id: string, title: string) {
     try {
@@ -655,14 +705,14 @@ function App() {
           onDrop={() => {
             if (!draggedId) return
             if (draggedItem?.kind === 'journal') void moveItem(draggedId, '', -1)
-            else if (defaultJournalId) void moveItem(draggedId, defaultJournalId, -1)
+            else if (creationParentId) void moveItem(draggedId, creationParentId, -1)
           }}
         >
           <div className="library-head">
             <div className="mini-actions">
               <button type="button" onClick={() => void createJournal()} disabled={creationDisabled} title="New journal"><BookPlus size={15}/></button>
-              <button type="button" onClick={() => void createDocument(defaultJournalId)} disabled={creationDisabled} title="New document"><FilePlus size={15}/></button>
-              <button type="button" onClick={() => void createFolder(defaultJournalId)} disabled={creationDisabled} title="New folder"><FolderPlus size={15}/></button>
+              <button type="button" onClick={() => void createDocument(creationParentId)} disabled={creationDisabled} title="New document"><FilePlus size={15}/></button>
+              <button type="button" onClick={() => void createFolder(creationParentId)} disabled={creationDisabled} title="New folder"><FolderPlus size={15}/></button>
               <button type="button" className={settingsOpen ? 'icon-button active' : 'icon-button'} onClick={() => setSettingsOpen((value) => !value)} title="Autosave settings"><Settings size={15}/></button>
             </div>
           </div>
@@ -791,8 +841,8 @@ function App() {
               <FileText size={42}/>
               <h1>Select or create a document</h1>
               <div>
-                <button type="button" onClick={() => void createDocument(defaultJournalId)} disabled={creationDisabled}><Plus size={16}/>Document</button>
-                <button type="button" onClick={() => void createFolder(defaultJournalId)} disabled={creationDisabled}><FolderPlus size={16}/>Folder</button>
+                <button type="button" onClick={() => void createDocument(creationParentId)} disabled={creationDisabled}><Plus size={16}/>Document</button>
+                <button type="button" onClick={() => void createFolder(creationParentId)} disabled={creationDisabled}><FolderPlus size={16}/>Folder</button>
               </div>
             </div>
           )}
@@ -1700,6 +1750,21 @@ function journalIdFor(items: TreeItem[], id: string) {
     current = current.parentId ? byId.get(current.parentId) : undefined
   }
   return ''
+}
+
+function creationParentFor(items: TreeItem[], selectedId: string, fallbackJournalId: string, trashId: string) {
+  const byId = new Map(items.map((item) => [item.id, item]))
+  let selected = selectedId ? byId.get(selectedId) : undefined
+  while (selected) {
+    if (selected.id === trashId) return fallbackJournalId
+    if (selected.kind === 'journal' || selected.kind === 'folder') return selected.id
+    selected = selected.parentId ? byId.get(selected.parentId) : undefined
+  }
+  return fallbackJournalId
+}
+
+function shouldAutoDismissError(message: string) {
+  return message.trim().length > 0
 }
 
 function encryptedJournalIds(items: TreeItem[]) {

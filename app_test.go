@@ -2,6 +2,7 @@ package main
 
 import (
 	"database/sql"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -927,12 +928,122 @@ func TestDecryptJournalRestoresPlaintextSearchAndBlocksBoundaryMoves(t *testing.
 	}
 }
 
+func TestImportMarkdownDirectoryImportsNestedFiles(t *testing.T) {
+	service := newTestService(t)
+	sourceDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(sourceDir, "Root Note.md"), []byte("# Root Note\n\nTop level body.\n"), 0o644); err != nil {
+		t.Fatalf("write root markdown: %v", err)
+	}
+	nestedDir := filepath.Join(sourceDir, "Projects")
+	if err := os.MkdirAll(nestedDir, 0o755); err != nil {
+		t.Fatalf("make nested folder: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(nestedDir, "Plan.md"), []byte("1. First\n2. Second\n"), 0o644); err != nil {
+		t.Fatalf("write nested markdown: %v", err)
+	}
+
+	response, err := service.ImportMarkdownDirectory(sourceDir)
+	if err != nil {
+		t.Fatalf("import markdown directory: %v", err)
+	}
+	if response.Item.Kind != KindJournal {
+		t.Fatalf("expected imported journal, got %#v", response.Item)
+	}
+	imported := findTreeItem(response.Tree.Items, response.Item.ID)
+	if imported == nil {
+		t.Fatalf("expected imported journal in tree, got %#v", response.Tree.Items)
+	}
+	rootDoc := findTreeItemByTitle(imported.Children, "Root Note")
+	if rootDoc == nil || rootDoc.Kind != KindDocument {
+		t.Fatalf("expected root markdown document, got %#v", imported.Children)
+	}
+	projects := findTreeItemByTitle(imported.Children, "Projects")
+	if projects == nil || projects.Kind != KindFolder {
+		t.Fatalf("expected nested folder, got %#v", imported.Children)
+	}
+	plan := findTreeItemByTitle(projects.Children, "Plan")
+	if plan == nil || plan.Kind != KindDocument {
+		t.Fatalf("expected nested markdown document, got %#v", projects.Children)
+	}
+	opened, err := service.OpenDocument(plan.ID)
+	if err != nil {
+		t.Fatalf("open nested imported document: %v", err)
+	}
+	if text := extractText(opened.Content); !strings.Contains(text, "First") || !strings.Contains(text, "Second") {
+		t.Fatalf("expected imported ordered list text, got %q", text)
+	}
+}
+
+func TestExportJournalManifestOmitsDocumentContent(t *testing.T) {
+	service := newTestService(t)
+	tree, err := service.GetLibraryTree()
+	if err != nil {
+		t.Fatalf("tree: %v", err)
+	}
+	journal := tree.Items[0]
+	doc, err := service.CreateDocument(journal.ID)
+	if err != nil {
+		t.Fatalf("create document: %v", err)
+	}
+	if _, err := service.RenameItem(doc.ID, "Exported Note"); err != nil {
+		t.Fatalf("rename document: %v", err)
+	}
+	content := map[string]any{
+		"type": "doc",
+		"content": []any{
+			map[string]any{
+				"type": "paragraph",
+				"content": []any{
+					map[string]any{"type": "text", "text": "Body text should live in markdown."},
+				},
+			},
+		},
+	}
+	if _, err := service.UpdateDocumentDraft(doc.ID, content, 1); err != nil {
+		t.Fatalf("draft: %v", err)
+	}
+	if _, err := service.FlushDocument(doc.ID); err != nil {
+		t.Fatalf("flush: %v", err)
+	}
+	exportDir := t.TempDir()
+	if err := service.ExportJournalToDirectory(journal.ID, exportDir); err != nil {
+		t.Fatalf("export journal: %v", err)
+	}
+	manifestPath := filepath.Join(exportDir, journal.Title, journalExportManifestName)
+	manifest, err := os.ReadFile(manifestPath)
+	if err != nil {
+		t.Fatalf("read manifest: %v", err)
+	}
+	if strings.Contains(string(manifest), `"content"`) || strings.Contains(string(manifest), "Body text should live in markdown.") {
+		t.Fatalf("manifest should not contain document body JSON: %s", manifest)
+	}
+	markdown, err := os.ReadFile(filepath.Join(exportDir, journal.Title, "Exported Note.md"))
+	if err != nil {
+		t.Fatalf("read exported markdown: %v", err)
+	}
+	if !strings.Contains(string(markdown), "Body text should live in markdown.") {
+		t.Fatalf("expected body in markdown, got %q", markdown)
+	}
+}
+
 func findTreeItem(items []TreeItem, id string) *TreeItem {
 	for i := range items {
 		if items[i].ID == id {
 			return &items[i]
 		}
 		if found := findTreeItem(items[i].Children, id); found != nil {
+			return found
+		}
+	}
+	return nil
+}
+
+func findTreeItemByTitle(items []TreeItem, title string) *TreeItem {
+	for i := range items {
+		if items[i].Title == title {
+			return &items[i]
+		}
+		if found := findTreeItemByTitle(items[i].Children, title); found != nil {
 			return found
 		}
 	}

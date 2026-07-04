@@ -20,6 +20,7 @@ Journal is a local desktop writing application that just lets you write and orga
 - Inline image support
 - Table support
 - Strong encryption per-Journal, locked and unlocked via a single master password.
+- Journal export to Markdown files, import from Markdown files
 
 ## Requirements
 

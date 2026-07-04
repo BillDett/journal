@@ -55,8 +55,18 @@ func main() {
 }
 
 func applicationMenu(app *App, name string) *menu.Menu {
+	fileMenu := menu.NewMenu()
+	app.exportJournalItem = fileMenu.AddText("Export Journal", nil, func(_ *menu.CallbackData) {
+		app.EmitExportJournalMenuAction()
+	})
+	app.importJournalItem = fileMenu.AddText("Import Journal", nil, func(_ *menu.CallbackData) {
+		app.EmitImportJournalMenuAction()
+	})
+	app.exportJournalItem.Disable()
+	file := menu.SubMenu("File", fileMenu)
+
 	if runtime.GOOS == "darwin" {
-		return menu.NewMenuFromItems(menu.AppMenu(), menu.EditMenu(), menu.WindowMenu())
+		return menu.NewMenuFromItems(menu.AppMenu(), file, menu.EditMenu(), menu.WindowMenu())
 	}
 
 	helpMenu := menu.NewMenu()
@@ -64,5 +74,5 @@ func applicationMenu(app *App, name string) *menu.Menu {
 		app.ShowAbout()
 	})
 	help := menu.SubMenu("Help", helpMenu)
-	return menu.NewMenuFromItems(help)
+	return menu.NewMenuFromItems(file, help)
 }

@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/wailsapp/wails/v2/pkg/menu"
 	"github.com/wailsapp/wails/v2/pkg/runtime"
 	_ "modernc.org/sqlite"
 )
@@ -44,8 +45,11 @@ const (
 var appVersion = ""
 
 type App struct {
-	ctx     context.Context
-	service *JournalService
+	ctx               context.Context
+	service           *JournalService
+	selectedJournalID string
+	exportJournalItem *menu.MenuItem
+	importJournalItem *menu.MenuItem
 }
 
 func NewApp() *App {
@@ -208,6 +212,42 @@ func (a *App) ShowAbout() {
 		return
 	}
 	runtime.EventsEmit(a.ctx, "journal:show-about")
+}
+
+func (a *App) SetSelectedJournalForMenu(journalID string) {
+	a.selectedJournalID = strings.TrimSpace(journalID)
+	a.updateFileMenuState()
+}
+
+func (a *App) EmitExportJournalMenuAction() {
+	if a.ctx == nil || strings.TrimSpace(a.selectedJournalID) == "" {
+		return
+	}
+	runtime.EventsEmit(a.ctx, "journal:menu-export-journal", a.selectedJournalID)
+}
+
+func (a *App) EmitImportJournalMenuAction() {
+	if a.ctx == nil {
+		return
+	}
+	runtime.EventsEmit(a.ctx, "journal:menu-import-journal")
+}
+
+func (a *App) updateFileMenuState() {
+	enabled := strings.TrimSpace(a.selectedJournalID) != ""
+	if a.exportJournalItem != nil {
+		if enabled {
+			a.exportJournalItem.Enable()
+		} else {
+			a.exportJournalItem.Disable()
+		}
+	}
+	if a.importJournalItem != nil {
+		a.importJournalItem.Enable()
+	}
+	if a.ctx != nil {
+		runtime.MenuUpdateApplicationMenu(a.ctx)
+	}
 }
 
 type AppInfo struct {
