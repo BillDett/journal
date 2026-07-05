@@ -1,5 +1,38 @@
 # Cloud Journals Design Specification
 
+## Table Of Contents
+
+- [Goal](#goal)
+- [Standards Basis](#standards-basis)
+- [Registry Compatibility And Concurrency Caveat](#registry-compatibility-and-concurrency-caveat)
+- [Non-Goals](#non-goals)
+- [First-Pass Product Decisions](#first-pass-product-decisions)
+- [Foundational Implementation Decisions](#foundational-implementation-decisions)
+- [Terminology](#terminology)
+- [Storage Topology](#storage-topology)
+- [Current Local App Database Responsibilities](#current-local-app-database-responsibilities)
+- [OCI Provider Settings](#oci-provider-settings)
+- [Cloud Mount Registry](#cloud-mount-registry)
+- [OCI Artifact Model](#oci-artifact-model)
+- [Journal Database Contents](#journal-database-contents)
+- [Revision Publication Protocol](#revision-publication-protocol)
+- [Locking Model](#locking-model)
+- [New Device Recovery](#new-device-recovery)
+- [Encryption Requirements](#encryption-requirements)
+- [Backend Architecture](#backend-architecture)
+- [OCI Registry Client Interface](#oci-registry-client-interface)
+- [Frontend Requirements](#frontend-requirements)
+- [Create Journal Flow](#create-journal-flow)
+- [Sync And Publish Flow](#sync-and-publish-flow)
+- [Conflict Handling](#conflict-handling)
+- [Search](#search)
+- [Backup And Revision Retention](#backup-and-revision-retention)
+- [Error Handling Requirements](#error-handling-requirements)
+- [Migration Plan](#migration-plan)
+- [Test Plan](#test-plan)
+- [First Iteration Decisions](#first-iteration-decisions)
+- [Final Design Rule](#final-design-rule)
+
 ## Goal
 
 Add cloud-managed Journals while keeping the current local Journal behavior
@@ -570,22 +603,6 @@ Rules:
 - The lock tag is mutable and points to the latest lock artifact.
 - A publish must never mutate a revision tag after it has been pushed.
 - A publish may update the current tag only after conflict checks pass.
-
-## Components No Longer Implemented
-
-Because OCI provides descriptors, manifests, tags, blobs, and registry APIs, the
-app must not implement the old filesystem package components:
-
-- No `.journalcloud` directory format.
-- No custom top-level `manifest.json`.
-- No custom `revisions/` directory.
-- No custom `tmp/` upload directory.
-- No `journal.db.sha256` sidecar files.
-- No filesystem atomic rename protocol for cloud publishing.
-- No cloud folder scan for `.journalcloud` packages.
-- No filesystem cloud sync status inference.
-
-Integrity is checked using OCI descriptor digests and sizes.
 
 ## Journal Database Contents
 
