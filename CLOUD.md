@@ -89,6 +89,8 @@ possible on registries without conditional update support.
   another cloud-synced path.
 - Filesystem cloud packages such as `.journalcloud` directories.
 - A hosted Journal service owned by this application.
+- Replacing local-only storage with an embedded OCI registry or required local
+  content-addressable blob store.
 - Converting a Journal from local to cloud or cloud to local after creation.
 - Supporting non-OCI cloud storage for cloud Journals in the first
   implementation.
@@ -123,10 +125,17 @@ created. They are not later cleanup work.
 - Cloud Journal encryption portability is part of the artifact format. The app
   must not create encrypted cloud Journals until the portable cloud encryption
   schema is implemented and tested with new-device recovery.
-- Cached cloud Journal databases must be opened in a cloud-specific service
-  mode. The existing local app database migrations must not run unchanged
-  against cloud cache databases because they create app-wide settings, default
-  local Journals, and local convenience state.
+- Local-only users must keep the simplest possible data-management model: one
+  SQLite database under the app config directory, with no local OCI registry or
+  required blob-store layout.
+- Local and cloud Journal content must use one journal-content schema. Cloud
+  Journal cache databases should be full journal-content databases, not reduced
+  or second-class databases with a divergent table model.
+- App-installation state must be separated from portable Journal content.
+  Provider settings, mount records, UI settings, and local convenience state
+  belong to the local app database, not to portable cloud Journal artifacts.
+- OCI is the cloud publication and recovery layer. It is not the universal
+  storage engine for local-only Journals in the first implementation.
 - API routing must identify both the store and the item/document inside that
   store. Plain item IDs are not enough once multiple SQLite databases are open.
 - Cloud attachment externalization must include a local blob-cache lifecycle.
@@ -161,8 +170,29 @@ created. They are not later cleanup work.
 
 ## Storage Topology
 
-The application uses one local app database plus one cached SQLite database per
-opened or mounted cloud Journal.
+The application keeps the current local-only storage experience simple:
+local-only users continue to have one SQLite database at:
+
+```text
+<user-config-dir>/Journal/journal.db
+```
+
+Cloud support adds cached SQLite databases only for cloud-managed Journals. It
+does not replace local storage with an embedded OCI registry, a required local
+blob store, or an OCI layout directory.
+
+The key split is schema ownership:
+
+- **Journal content schema**: portable tables that describe Journals, folders,
+  documents, attachments, search index data, and Journal encryption metadata.
+  This schema is shared by local and cloud Journal databases.
+- **App installation schema**: non-portable tables for settings, OCI providers,
+  cloud mounts, cache state, window/sidebar preferences, and other convenience
+  state. This schema lives only in the local app database.
+
+For local Journals, the local app database contains both schema groups. For
+cloud Journals, each cached cloud database contains only the journal-content
+schema plus cloud Journal metadata.
 
 Example:
 
@@ -204,6 +234,31 @@ there are three SQLite databases on that device:
 There is not one shared SQLite database for all cloud Journals. Each cloud
 Journal is an independent portability, locking, backup, and recovery unit.
 
+Cloud cached `journal.db` files are still full journal-content databases. They
+are not reduced, special-purpose, or incompatible databases. They are scoped to
+one cloud Journal so that each cloud Journal can be published, locked, restored,
+and recovered independently.
+
+### Rejected Local Storage Alternative
+
+The app should not make every Journal an OCI artifact backed by a self-hosted
+registry inside the app backend in the first implementation.
+
+Reasons:
+
+- It would make local-only users manage a directory of content-addressed blobs
+  instead of one SQLite file.
+- It would introduce local garbage collection, blob integrity, and index
+  corruption modes that the current local app does not have.
+- The editor would still need a mutable SQLite working database for autosave,
+  search, encryption, tree operations, and attachment lookup, so the design
+  would add an artifact store without removing SQLite.
+- It would make backup and support harder for users who do not use cloud
+  Journals.
+
+OCI may be considered later for explicit local snapshot/export workflows, but it
+must not be a prerequisite for ordinary local Journal storage.
+
 ## Current Local App Database Responsibilities
 
 The existing local app database continues to own:
@@ -220,6 +275,10 @@ The existing local app database continues to own:
 
 The local app database must not be required to recover cloud Journal contents on
 a new device. It may only store convenience metadata about cloud Journals.
+
+In other words, the local app database remains the only database a local-only
+user needs to understand or back up. Cloud-specific state is additive and should
+not complicate the local-only path.
 
 ## OCI Provider Settings
 
@@ -379,6 +438,29 @@ as separate content-addressed OCI blobs/layers instead of being embedded inside
 the cloud Journal database. The Journal metadata is stored in the OCI config
 blob and mirrored selectively in annotations for discovery.
 
+The app must act as an OCI registry client, not as a Docker-style image puller.
+Opening a cloud Journal means pulling the current manifest and config, then
+pulling selected blobs by descriptor digest. The app should not invoke a
+whole-image pull operation that downloads every layer up front.
+
+Required pull pattern:
+
+```text
+1. GET /v2/<repository>/manifests/journal-<cloudJournalId>-current
+2. Read the config, SQLite layer descriptor, and attachment descriptors.
+3. GET /v2/<repository>/blobs/<sqlite-layer-digest>
+4. Open the cached SQLite database.
+5. Later, when an image is rendered or prefetched:
+   GET /v2/<repository>/blobs/<document_attachments.oci_digest>
+```
+
+The OCI Distribution API treats manifests and blobs as separately retrievable
+objects. The revision config and/or `document_attachments` rows provide the
+attachment digest index, and the registry blob endpoint retrieves only the
+needed blob. This is what makes lazy image download possible. If a future
+registry client library only exposes Docker-style "pull the whole image"
+behavior, it is not sufficient for this design.
+
 This split is required for bandwidth efficiency. If the entire cloud Journal,
 including images, were stored as one opaque SQLite blob, a small text edit could
 force a large image-heavy database to be pushed again. By storing attachments as
@@ -503,90 +585,133 @@ app must not implement the old filesystem package components:
 
 Integrity is checked using OCI descriptor digests and sizes.
 
-## Cloud Journal Database Contents
+## Journal Database Contents
 
-Each cloud Journal `journal.db` should reuse the current SQLite schema where
-possible, but it must represent only one Journal.
+The implementation should distinguish between a reusable journal-content schema
+and the local app installation schema.
 
-The backend must open cloud Journal databases in an explicit cloud mode. Local
-app database migration side effects are not allowed in cloud mode. In
-particular, cloud mode must not create app-wide settings, provider settings,
-cloud mount records for other Journals, or a default local Journal.
+### Journal Content Schema
 
-Recommended contents:
+The journal-content schema is the normal Journal data model. It should be shared
+by:
+
+- the existing local app database for local Journals;
+- each cached cloud Journal database;
+- the SQLite layer stored in each cloud revision artifact.
+
+Journal content tables:
 
 - `items`
 - `documents`
 - `document_attachments`
-- `cloud_attachment_blobs`
 - `journal_encryption_keys`
-- `encryption_master`, if needed for this Journal's portable encryption model
+- `encryption_master`, or an equivalent portable per-Journal encryption metadata
+  table if the encryption model is refined
 - `library_search_fts`, optional and disposable
-- a new `cloud_journal_metadata` table
+- `cloud_journal_metadata`, only for cloud Journal databases
 
-Trash handling needs an explicit rule because the current local implementation
-uses a top-level system Trash row. A cloud Journal database may contain one
-top-level system Trash row if the reused `JournalService` requires it, but it is
-part of that cloud Journal's cache and revision. It is not the app-wide local
-Trash. Validation should allow:
+The local app database may contain many local Journals in this schema. A cached
+cloud Journal database contains the same journal-content schema but is scoped to
+one cloud Journal. This keeps the database format full-fledged and reusable
+while keeping each cloud Journal independently publishable and recoverable.
+
+### App Installation Schema
+
+The app installation schema is not portable Journal content. It should remain in
+the local app database and should not be published as part of a cloud Journal
+revision.
+
+App installation tables include:
+
+- app settings such as autosave interval, sidebar width, and last active local
+  document;
+- OCI provider configuration;
+- cloud mount records;
+- local cache metadata for cloud Journals;
+- provider validation and rate-limit state;
+- local UI convenience state.
+
+The migration code should be split so journal-content migrations can run against
+both the local app database and cached cloud Journal databases, while
+app-installation migrations run only against the local app database. This avoids
+making cloud databases second-class while still preventing provider settings and
+UI state from leaking into cloud revision artifacts.
+
+### Cloud Journal Scope Validation
+
+A cloud Journal database must represent exactly one cloud Journal content unit.
+Validation should allow:
 
 - exactly one top-level Journal root;
-- zero or one top-level system Trash row;
+- zero or one top-level system Trash row, if the shared journal-content schema
+  requires one;
 - no other top-level roots;
 - no unrelated top-level Journals.
 
-The cloud database should not contain app-wide settings such as:
+The system Trash row, if present, is part of that cloud Journal's content
+database. It is not the app-wide local Trash.
 
-- global autosave interval
-- library pane width
-- app-wide last opened document
-- mount records for other cloud Journals
-- unrelated local Journals
+The cloud database should not contain app-installation state such as:
+
+- global autosave interval;
+- library pane width;
+- app-wide last opened document;
+- provider settings;
+- mount records for other cloud Journals;
+- unrelated local Journals.
 
 ### Cloud Attachment Storage
 
-Local Journals may continue to use the current inline attachment storage in
-`document_attachments.content_blob` or `content_ciphertext`.
+Local and cloud Journals use the same `document_attachments` table. The
+difference is where the payload bytes live.
 
-Cloud Journals should not store image bytes inline in the cloud Journal
-database. They should store attachment metadata and OCI descriptors instead.
-This keeps the catalog database small and lets the OCI registry deduplicate
-unchanged images across revisions.
+Local Journals use inline attachment storage:
 
-Add a table to each cloud Journal database:
+- `storage_kind = 'inline'`
+- `content_blob` contains plaintext bytes, or `content_ciphertext` contains
+  encrypted bytes
+- OCI descriptor fields are empty
+
+Cloud Journals use external OCI blob storage:
+
+- `storage_kind = 'oci'`
+- `content_blob` and `content_ciphertext` are `NULL` after the attachment has
+  been externalized
+- OCI descriptor fields identify the remote blob and decryption metadata
+
+This keeps one logical attachment schema while letting cloud Journals avoid
+pushing unchanged image bytes after every text edit.
+
+Extend the shared `document_attachments` table with cloud descriptor fields:
 
 ```sql
-CREATE TABLE cloud_attachment_blobs (
-  attachment_id TEXT PRIMARY KEY,
-  digest TEXT NOT NULL,
-  media_type TEXT NOT NULL,
-  mime_type TEXT NOT NULL,
-  original_name TEXT NOT NULL DEFAULT '',
-  size_bytes INTEGER NOT NULL,
-  encryption_alg TEXT NOT NULL DEFAULT '',
-  encryption_key_id TEXT NOT NULL DEFAULT '',
-  encryption_nonce BLOB NULL,
-  created_at TEXT NOT NULL,
-  updated_at TEXT NOT NULL
-);
+ALTER TABLE document_attachments ADD COLUMN storage_kind TEXT NOT NULL DEFAULT 'inline';
+ALTER TABLE document_attachments ADD COLUMN oci_digest TEXT NOT NULL DEFAULT '';
+ALTER TABLE document_attachments ADD COLUMN oci_media_type TEXT NOT NULL DEFAULT '';
+ALTER TABLE document_attachments ADD COLUMN oci_size_bytes INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE document_attachments ADD COLUMN oci_encryption_alg TEXT NOT NULL DEFAULT '';
+ALTER TABLE document_attachments ADD COLUMN oci_encryption_key_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE document_attachments ADD COLUMN oci_encryption_nonce BLOB NULL;
 ```
 
 Rules:
 
-- `attachment_id` matches the attachment node referenced by ProseMirror JSON.
-- `digest` is the OCI blob digest for the attachment payload.
-- `media_type` is normally `application/vnd.journal.attachment.v1`.
-- `mime_type` is the original image MIME type, such as `image/png` or
-  `image/jpeg`.
+- `id` remains the attachment node ID referenced by ProseMirror JSON.
+- `storage_kind` is `inline` for local inline bytes and `oci` for cloud-managed
+  OCI blobs.
+- `oci_digest` is the OCI blob digest for the attachment payload when
+  `storage_kind = 'oci'`.
+- `oci_media_type` is normally `application/vnd.journal.attachment.v1`.
+- `oci_size_bytes` is the remote OCI blob size.
 - For plaintext cloud Journals, the OCI attachment blob contains the original
   image bytes.
 - For encrypted cloud Journals, the OCI attachment blob contains encrypted image
-  bytes, and the table stores the metadata needed to decrypt them.
+  bytes, and the `oci_encryption_*` fields store the metadata needed to decrypt
+  them.
 - Encrypted attachment blobs must use a specified algorithm and associated-data
   scheme. The first implementation should use the same XChaCha20-Poly1305
   primitive as local Journal encryption, with associated data derived from the
-  cloud Journal ID, attachment ID, blob digest, media type, and encryption key
-  ID.
+  cloud Journal ID, attachment ID, OCI digest, media type, and encryption key ID.
 - `document_attachments.content_blob` and `content_ciphertext` should be `NULL`
   for cloud-managed attachments after the attachment has been externalized.
 - The attachment digest may also be included in the revision config blob so a
@@ -608,6 +733,16 @@ app database table. Cache state may include local blob paths, `missing`,
 `present`, `fetching`, or `error` status, and the last fetch error. It must not
 be required for new-device recovery and must not be included in OCI revision
 artifacts.
+
+When a new image is inserted into a cloud Journal, the app must durably store the
+payload locally before returning success. The first implementation should write
+the pending payload into the local attachment cache, create or update the
+`document_attachments` row with `storage_kind = 'oci'`, and mark the cloud
+Journal dirty. During publish, the app uploads the cached payload as an OCI blob,
+verifies the digest and size, updates `oci_digest`, `oci_media_type`, and
+`oci_size_bytes`, and then includes that descriptor in the revision config and
+manifest. If publish fails, the cached payload and dirty database remain local
+and retryable.
 
 ### Cloud Metadata Table
 
@@ -844,7 +979,7 @@ The new device should support:
 7. Download the SQLite layer for the selected Journal.
 8. Verify layer digest and size using the OCI descriptor.
 9. Record the attachment descriptors listed in the revision config and/or
-   SQLite metadata.
+   `document_attachments` OCI descriptor fields.
 10. Open the cached SQLite database and validate schema.
 11. Create a cloud mount record in the local app database.
 12. If locked:
@@ -854,8 +989,8 @@ The new device should support:
 13. Open the cached Journal database.
 
 Attachment blobs do not all need to be downloaded during reconnect. The app may
-download them lazily when images are rendered, while preserving enough metadata
-to show missing-image placeholders and retry downloads.
+download them lazily by `oci_digest` when images are rendered, while preserving
+enough metadata to show missing-image placeholders and retry downloads.
 
 If a provider cannot list tags but can resolve explicit tags, the reconnect flow
 should offer a manual recovery path where the user enters a cloud Journal ID or
@@ -927,23 +1062,53 @@ Required cloud encryption model:
 ## Backend Architecture
 
 The current `JournalService` owns a single SQLite database. Cloud Journals
-require a routing layer that can dispatch operations to either the local app
-database service or a cloud Journal cache service.
+require a routing layer that can dispatch operations to a store, while keeping
+the journal-content behavior shared.
+
+The goal is not to create separate local and cloud Journal models. The goal is
+to make one Journal content service usable against either:
+
+- the local app database, for local Journals;
+- a cached cloud Journal database, for one cloud Journal.
+
+Cloud behavior such as locking, dirty state, publication, and registry recovery
+wraps the same journal-content service.
 
 Recommended structure:
 
 ```text
 App
   LibraryCoordinator
-    Local JournalService
+    LocalStore
+      JournalService over <user-config-dir>/Journal/journal.db
     CloudProviderRegistry
     CloudMountRegistry
     CloudJournalSession(s)
-      JournalService for cached journal.db
+      JournalService over cloud-cache/<cloud-journal-id>/journal.db
       OCIRegistryClient
       LockManager
       RevisionPublisher
 ```
+
+Recommended service split:
+
+```text
+JournalContentService
+  - owns item/document/attachment/search/encryption operations
+  - runs journal-content migrations
+  - has no provider, mount, or app settings responsibilities
+
+AppInstallationService
+  - owns app settings
+  - owns provider settings
+  - owns cloud mount records
+  - owns local cache metadata
+```
+
+The existing `JournalService` can be refactored toward this split incrementally.
+The important invariant is that journal operations do not need to know whether a
+Journal is local or cloud except through store routing and write-permission
+checks.
 
 ### ID Routing
 
@@ -1254,7 +1419,8 @@ succeeded.
    - User selects one configured OCI provider.
    - App creates a local pending cloud-create record before starting network
      writes.
-   - App creates a cached Journal database with one root Journal.
+   - App creates a cached Journal database using the shared journal-content
+     schema with one root Journal.
    - App writes revision `0000000001` as an OCI artifact.
    - App tags the revision artifact as:
 
@@ -1430,20 +1596,23 @@ preserve local and remote data.
 
 ## Migration Plan
 
-Phase 1: Internal Store Routing And Service Modes
+Phase 1: Shared Journal Content Service And Store Routing
 
 - Introduce store IDs or item references.
 - Route existing local operations through the coordinator.
-- Add explicit local-app and cloud-Journal service modes.
-- Ensure cloud-mode migrations do not create app-wide settings, provider state,
-  or default local Journals.
-- Define per-cloud Trash behavior.
+- Split migrations into journal-content migrations and app-installation
+  migrations.
+- Keep the journal-content schema shared by local Journals and cached cloud
+  Journal databases.
+- Keep app settings, provider state, mount records, and UI convenience state in
+  the app-installation schema only.
+- Define per-cloud Journal root and Trash validation.
 - Keep behavior identical for local Journals.
 - Add tests proving local behavior is unchanged.
 
 Phase 2: Portable Cloud Journal Format
 
-- Define cloud Journal database schema and validation.
+- Define cloud Journal scope validation for a full journal-content database.
 - Define cloud attachment metadata, local blob cache state, and lazy fetch
   behavior.
 - Define portable cloud encryption records and new-device unlock behavior.
@@ -1464,7 +1633,7 @@ Phase 4: Mount And Open
 - Add `cloud_journal_mounts`.
 - Add pending cloud-create recovery state.
 - Add OCI tag discovery/open flow for new-device recovery.
-- Open cached cloud Journal DB through a `JournalService`.
+- Open cached cloud Journal DB through the shared journal-content service.
 - Compose local and cloud Journals in `GetLibraryTree`.
 
 Phase 5: Locking
@@ -1497,8 +1666,11 @@ Phase 7: UI
 Backend tests:
 
 - Local Journals still work with the coordinator.
-- Cloud Journal service mode does not create app-wide settings, provider state,
-  default local Journals, or unrelated root rows.
+- Journal-content migrations run against both local app databases and cached
+  cloud Journal databases.
+- App-installation migrations do not run against cached cloud Journal databases
+  and do not leak app settings, provider state, or mount records into cloud
+  revision artifacts.
 - Cloud Journal validation accepts exactly one root Journal and the allowed
   per-cloud system Trash shape.
 - Add multiple OCI providers.
@@ -1515,14 +1687,16 @@ Backend tests:
 - Verify pulled SQLite layer digest and size.
 - Verify unchanged image attachments are not uploaded again after a text-only
   edit.
+- Verify cloud Journal open pulls the manifest/config and SQLite blob without
+  downloading every attachment blob.
 - Verify a second publish does not start while a previous publish is still in
   progress.
 - Verify HTTP 429 records provider rate-limit state, honors `Retry-After`, and
   recommends increasing `publish_min_interval_ms`.
 - Verify local edits remain saved when registry publish is delayed or fails.
 - Verify changing provider publish timing affects the next scheduled publish.
-- Verify cloud Journal images can be downloaded lazily from attachment blob
-  descriptors.
+- Verify cloud Journal images can be downloaded lazily by
+  `document_attachments.oci_digest`.
 - Verify missing attachment blobs show placeholders without preventing document
   text from opening.
 - Crash simulation before current tag update leaves previous revision current.
