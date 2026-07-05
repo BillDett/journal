@@ -41,6 +41,46 @@ References:
 - OCI Distribution Specification 1.1:
   <https://github.com/opencontainers/distribution-spec/blob/v1.1.0/spec.md>
 
+## Registry Compatibility And Concurrency Caveat
+
+OCI registry APIs are a good fit for immutable revision blobs and digest-based
+integrity checks, but they are not a complete distributed database protocol.
+
+The first implementation must treat registry behavior as provider-capability
+driven, not as uniformly available across all OCI-compatible registries.
+
+Required first-pass provider validation:
+
+- Pull manifest by tag.
+- Pull manifest by digest.
+- Push blobs.
+- Push manifests under tags.
+- List tags, including pagination.
+- Resolve manifest digest after a push.
+- Return enough response information to distinguish authentication,
+  authorization, missing repository, missing tag, missing blob, and rate limit
+  errors.
+
+Optional provider capabilities:
+
+- Delete tags or manifests.
+- Conditional manifest or tag updates using ETag, `If-Match`, or equivalent
+  behavior.
+- Referrers API support.
+
+The first implementation should maintain a small compatibility matrix for
+tested providers. The first documented provider is quay.io. Provider validation
+should record the capabilities observed for that configured provider so the rest
+of the app can make conservative choices.
+
+Mutable OCI tags are not compare-and-swap variables in the general case. A
+client can re-read `current`, observe the expected `base_digest`, and still lose
+a race when another client updates the same tag immediately afterward. Advisory
+locks and `base_digest` checks reduce this risk, but they do not eliminate it
+unless the selected registry supports conditional tag or manifest updates. The
+UI and conflict handling must assume that rare last-writer-wins races are
+possible on registries without conditional update support.
+
 ## Non-Goals
 
 - Real-time collaboration.
@@ -74,6 +114,27 @@ References:
 - OCI referrers should not be used in the first implementation.
 - OCI-compatible artifact signing is not needed in the first implementation,
   but may be considered longer term.
+
+## Foundational Implementation Decisions
+
+These decisions must be implemented before any user-facing cloud Journal is
+created. They are not later cleanup work.
+
+- Cloud Journal encryption portability is part of the artifact format. The app
+  must not create encrypted cloud Journals until the portable cloud encryption
+  schema is implemented and tested with new-device recovery.
+- Cached cloud Journal databases must be opened in a cloud-specific service
+  mode. The existing local app database migrations must not run unchanged
+  against cloud cache databases because they create app-wide settings, default
+  local Journals, and local convenience state.
+- API routing must identify both the store and the item/document inside that
+  store. Plain item IDs are not enough once multiple SQLite databases are open.
+- Cloud attachment externalization must include a local blob-cache lifecycle.
+  The editor cannot assume every attachment payload is stored inline in
+  `document_attachments`.
+- Registry capability detection must run before creating or reconnecting a cloud
+  Journal. If a required capability is absent, cloud creation for that provider
+  must fail before local or remote partial state is created.
 
 ## Terminology
 
@@ -189,6 +250,7 @@ CREATE TABLE cloud_providers (
   publish_max_interval_ms INTEGER NOT NULL DEFAULT 1800000,
   revision_retention_count INTEGER NOT NULL DEFAULT 50,
   status TEXT NOT NULL DEFAULT 'unknown',
+  capabilities_json TEXT NOT NULL DEFAULT '{}',
   last_rate_limited_at TEXT NOT NULL DEFAULT '',
   last_rate_limit_retry_after_ms INTEGER NOT NULL DEFAULT 0,
   last_validated_at TEXT NOT NULL DEFAULT '',
@@ -216,6 +278,9 @@ Rules:
   Journals stored through this provider.
 - `revision_retention_count` controls how many revision tags should be retained
   per cloud Journal for this provider. The default is 50.
+- `capabilities_json` records provider behavior observed during validation, such
+  as tag listing support, tag deletion support, conditional update support, and
+  whether the provider returned useful manifest digests after pushes.
 - `last_rate_limited_at` and `last_rate_limit_retry_after_ms` record the most
   recent HTTP 429 response observed for this provider.
 - More than one provider row may exist at the same time.
@@ -231,9 +296,15 @@ Settings must support:
 - Add OCI provider.
 - Rename provider display name.
 - Validate registry authentication and repository access.
+- Show provider capability validation results.
 - Configure provider publish timing.
 - Configure provider revision retention.
 - Remove provider from this device.
+
+The app should also persist a stable local device identity in app settings or a
+small device table. Lock payloads use this identity as `ownerDeviceId`. The
+device ID is local convenience state only; losing it must not prevent recovery
+of cloud Journal contents.
 
 ## Cloud Mount Registry
 
@@ -257,6 +328,9 @@ CREATE TABLE cloud_journal_mounts (
   publish_min_interval_ms INTEGER NOT NULL DEFAULT 0,
   publish_max_interval_ms INTEGER NOT NULL DEFAULT 0,
   revision_retention_count INTEGER NOT NULL DEFAULT 0,
+  dirty INTEGER NOT NULL DEFAULT 0,
+  sync_status TEXT NOT NULL DEFAULT 'clean',
+  last_sync_error TEXT NOT NULL DEFAULT '',
   publish_in_progress INTEGER NOT NULL DEFAULT 0,
   last_publish_started_at TEXT NOT NULL DEFAULT '',
   last_publish_finished_at TEXT NOT NULL DEFAULT '',
@@ -269,6 +343,19 @@ CREATE TABLE cloud_journal_mounts (
 
 This table is convenience state only. It can be rebuilt by reconnecting to a
 registry provider and discovering Journal artifacts.
+
+Rules:
+
+- `dirty` means the cached cloud Journal database has local changes not yet
+  represented by the remote `current` revision.
+- `sync_status` should be a compact machine-readable state such as `clean`,
+  `dirty`, `syncing`, `rate_limited`, `conflict`, `offline`, `auth_failed`, or
+  `error`.
+- `last_sync_error` is display/debug context only. It must not be used as the
+  source of truth for whether data is recoverable.
+- If `provider_id` is removed locally, the duplicated `registry` and
+  `repository` values are used to help reconnect or remap the mount, but the app
+  still needs valid credentials before it can sync.
 
 ## OCI Artifact Model
 
@@ -421,6 +508,11 @@ Integrity is checked using OCI descriptor digests and sizes.
 Each cloud Journal `journal.db` should reuse the current SQLite schema where
 possible, but it must represent only one Journal.
 
+The backend must open cloud Journal databases in an explicit cloud mode. Local
+app database migration side effects are not allowed in cloud mode. In
+particular, cloud mode must not create app-wide settings, provider settings,
+cloud mount records for other Journals, or a default local Journal.
+
 Recommended contents:
 
 - `items`
@@ -431,6 +523,17 @@ Recommended contents:
 - `encryption_master`, if needed for this Journal's portable encryption model
 - `library_search_fts`, optional and disposable
 - a new `cloud_journal_metadata` table
+
+Trash handling needs an explicit rule because the current local implementation
+uses a top-level system Trash row. A cloud Journal database may contain one
+top-level system Trash row if the reused `JournalService` requires it, but it is
+part of that cloud Journal's cache and revision. It is not the app-wide local
+Trash. Validation should allow:
+
+- exactly one top-level Journal root;
+- zero or one top-level system Trash row;
+- no other top-level roots;
+- no unrelated top-level Journals.
 
 The cloud database should not contain app-wide settings such as:
 
@@ -460,6 +563,7 @@ CREATE TABLE cloud_attachment_blobs (
   mime_type TEXT NOT NULL,
   original_name TEXT NOT NULL DEFAULT '',
   size_bytes INTEGER NOT NULL,
+  encryption_alg TEXT NOT NULL DEFAULT '',
   encryption_key_id TEXT NOT NULL DEFAULT '',
   encryption_nonce BLOB NULL,
   created_at TEXT NOT NULL,
@@ -478,6 +582,11 @@ Rules:
   image bytes.
 - For encrypted cloud Journals, the OCI attachment blob contains encrypted image
   bytes, and the table stores the metadata needed to decrypt them.
+- Encrypted attachment blobs must use a specified algorithm and associated-data
+  scheme. The first implementation should use the same XChaCha20-Poly1305
+  primitive as local Journal encryption, with associated data derived from the
+  cloud Journal ID, attachment ID, blob digest, media type, and encryption key
+  ID.
 - `document_attachments.content_blob` and `content_ciphertext` should be `NULL`
   for cloud-managed attachments after the attachment has been externalized.
 - The attachment digest may also be included in the revision config blob so a
@@ -486,6 +595,19 @@ Rules:
   prefetch them when opening a Journal.
 - Missing attachment blobs should not prevent the document text from opening;
   the editor should show a clear missing-image placeholder.
+
+Attachment lookup must route through the cloud session. The current local API
+shape `GetDocumentAttachmentDataURL(attachmentID)` is not enough when attachment
+IDs are only unique inside a specific SQLite database. The API must include a
+store reference, or attachment IDs returned to the frontend must be namespaced at
+the API boundary.
+
+Local attachment cache state should live outside the published cloud Journal
+database, for example in `cloud-cache/<cloud-journal-id>/state.json` or a local
+app database table. Cache state may include local blob paths, `missing`,
+`present`, `fetching`, or `error` status, and the last fetch error. It must not
+be required for new-device recovery and must not be included in OCI revision
+artifacts.
 
 ### Cloud Metadata Table
 
@@ -513,7 +635,7 @@ The service should validate on open that:
 
 - Exactly one top-level Journal root exists.
 - `root_journal_id` exists and has kind `journal`.
-- No unrelated top-level Journals are present.
+- No unrelated top-level Journals or non-system root rows are present.
 - Required metadata keys exist.
 - The schema version is supported.
 
@@ -548,7 +670,9 @@ Required protocol:
 12. Pull or inspect the revision tag and verify that the registry reports the
     expected manifest digest.
 13. Re-read the remote current tag and confirm it still equals `base_digest`.
-14. Update the current tag to point to the new revision manifest:
+14. Update the current tag to point to the new revision manifest. If the
+    provider supports conditional tag or manifest updates, use the last observed
+    `current` descriptor as the condition:
 
     ```text
     journal-<cloudJournalId>-current
@@ -571,6 +695,13 @@ open a conflict flow.
 OCI registries generally allow mutable tag updates, but not all registries
 provide compare-and-swap semantics for tags. Therefore `base_digest` conflict
 checks are mandatory before and after pushing the revision artifact.
+
+If the provider does not support conditional updates, step 14 still has a
+residual race window. The implementation must record that provider limitation,
+keep advisory locks active, and preserve a local unsynced recovery copy whenever
+post-update verification detects that `current` does not point to the manifest
+the app just published. This is a data-safety limitation of the provider, not a
+normal merge conflict.
 
 ## Locking Model
 
@@ -622,10 +753,18 @@ To acquire a lock:
 6. If the lock exists but is expired, allow a force-takeover flow.
 7. After writing the lock tag, re-read it and verify that it resolves to this
    device's lock artifact digest.
+8. Confirm the lock payload's `baseRevisionDigest` still matches the current
+   tag digest observed by the session. If it does not, treat the session as
+   stale and reopen from the new current revision before allowing writes.
 
 OCI tag updates are not a perfect distributed lock. The lock is a product-level
 guard, not the only data safety mechanism. Revision conflict detection by
 `base_digest` remains mandatory before publishing.
+
+Lock times are based on device clocks, so the app should tolerate modest clock
+skew and display lock times as advisory. Force unlock remains available when a
+device is lost or its clock is wrong, but it must always preserve local and
+remote data until the user explicitly chooses a destructive recovery action.
 
 ### Lock Renewal
 
@@ -655,6 +794,11 @@ owned by the same device, or by updating the lock tag to a lock payload with:
 If the registry supports tag deletion and the lock tag still resolves to this
 device's lock digest, deletion may be used as an optimization. Failure to release
 is acceptable because locks expire.
+
+The released lock payload must include the normal lock identity fields
+(`format`, `formatVersion`, `cloudJournalId`, `lockId`, `ownerDeviceId`) in
+addition to `released` and the past `expiresAt`, so clients can validate that
+the release came from the device that held the lock.
 
 ### Force Unlock
 
@@ -688,7 +832,7 @@ The new device should support:
 
 1. `Reconnect Cloud Journal`.
 2. Choose one configured OCI provider to reconnect.
-3. List repository tags.
+3. List repository tags, following pagination until the listing is complete.
 4. Find tags matching:
 
    ```text
@@ -712,6 +856,11 @@ The new device should support:
 Attachment blobs do not all need to be downloaded during reconnect. The app may
 download them lazily when images are rendered, while preserving enough metadata
 to show missing-image placeholders and retry downloads.
+
+If a provider cannot list tags but can resolve explicit tags, the reconnect flow
+should offer a manual recovery path where the user enters a cloud Journal ID or
+full current tag. Automatic discovery can be unavailable without making the
+stored Journal unrecoverable.
 
 ### Recovery Requirements
 
@@ -744,6 +893,12 @@ The implementation must not require the original device's local
 `encryption_master` row unless that row is also present inside the cloud Journal
 database or revision config.
 
+Portable cloud encryption is required before encrypted cloud Journals are
+available. If the first user-facing cloud release does not include portable
+cloud encryption, the UI must disable encryption actions for cloud Journals and
+must reject creation of an encrypted cloud Journal before any artifact is
+published.
+
 Required cloud encryption model:
 
 - Each encrypted cloud Journal has a random Journal data key.
@@ -751,6 +906,12 @@ Required cloud encryption model:
   master password.
 - The KDF salt, KDF parameters, verifier, wrapped key nonce, and wrapped key
   ciphertext are stored inside the cloud Journal database or revision config.
+- These records are scoped to the cloud Journal. They must not depend on the
+  local app database's app-wide `encryption_master` row.
+- Changing the local app master password must not silently rewrap or invalidate
+  existing cloud Journals. Rewrapping a cloud Journal key for a new master
+  password must be an explicit cloud Journal operation that publishes a new
+  revision.
 - The local app may cache unlocked keys only in memory.
 - Local app database records may remember that a mounted cloud Journal is
   encrypted, but must not be the only source of key metadata.
@@ -793,14 +954,7 @@ Recommended approach:
 
 - Add a stable `storeId` or `sourceId` to all tree and document responses.
 - Keep raw item IDs unchanged inside each SQLite database.
-- Use composite IDs at the API boundary only if needed:
-
-```text
-local:<item-id>
-cloud:<cloud-journal-id>:<item-id>
-```
-
-Better long-term API shape:
+- Prefer structured references for new API methods:
 
 ```go
 type ItemRef struct {
@@ -809,8 +963,19 @@ type ItemRef struct {
 }
 ```
 
-For minimal frontend disruption, composite string IDs can be used first, but the
-backend should centralize parsing and formatting.
+- Use composite IDs at the API boundary only as a short-lived compatibility
+  bridge:
+
+```text
+local:<item-id>
+cloud:<cloud-journal-id>:<item-id>
+```
+
+Composite IDs must never be stored inside SQLite content, ProseMirror JSON, or
+OCI revision metadata. They are transport-only identifiers. If composite IDs are
+used temporarily, the backend should centralize parsing and formatting and tests
+should cover drag/drop, trash, search results, menu actions, attachment lookup,
+and encryption flows.
 
 ### Tree Composition
 
@@ -1087,6 +1252,8 @@ succeeded.
    - Existing local Journal behavior applies.
 4. If `Cloud` is selected and one or more OCI providers are configured:
    - User selects one configured OCI provider.
+   - App creates a local pending cloud-create record before starting network
+     writes.
    - App creates a cached Journal database with one root Journal.
    - App writes revision `0000000001` as an OCI artifact.
    - App tags the revision artifact as:
@@ -1103,6 +1270,7 @@ succeeded.
      ```
 
    - App creates a mount record in the local app database.
+   - App marks the pending cloud-create record complete.
    - App opens the cloud Journal for editing.
    - The Journal is permanently cloud-managed.
 5. If `Cloud` is selected and no OCI providers are configured:
@@ -1113,6 +1281,11 @@ succeeded.
 If multiple providers are configured, the create-Journal flow must not pick a
 default silently. It should require an explicit provider selection, while it may
 preselect the most recently used provider.
+
+If creation fails after remote artifacts have been written but before the mount
+is complete, the pending record should let the next launch either finish the
+mount or show a recoverable partial-create state. The app must not silently
+discard the local cached database or hide recoverable remote artifacts.
 
 ## Sync And Publish Flow
 
@@ -1126,7 +1299,8 @@ For an already mounted cloud Journal:
 5. Publish new revision artifact.
 6. Update the current tag to the new revision artifact.
 7. Update local mount `base_digest` and `current_digest`.
-8. Clear dirty state.
+8. Clear dirty state only after the app has verified that the remote current tag
+   resolves to the new revision manifest.
 
 If the registry is unavailable:
 
@@ -1135,6 +1309,10 @@ If the registry is unavailable:
 - Continue editing only if the device still owns a valid lock or the app is in a
   documented offline grace period.
 - Show sync error and retry later.
+
+The offline grace period must be explicit. It should define how long editing may
+continue without successful lock renewal, what UI warning is shown, and when the
+session becomes read-only to prevent accumulating unrecoverable divergence.
 
 ## Conflict Handling
 
@@ -1208,6 +1386,14 @@ Registry caveat:
   immediately delete blobs, and some registries may retain untagged blobs until
   administrator garbage collection.
 
+Product caveat:
+
+- Cloud Journals provide synchronized, versioned storage in the configured OCI
+  registry. They are not a guaranteed archival backup unless the selected
+  registry's retention, billing, access-control, and backup policies provide
+  that guarantee. The app should avoid language that implies permanent backup
+  beyond the retained revision tags.
+
 ## Error Handling Requirements
 
 The implementation must handle:
@@ -1244,66 +1430,87 @@ preserve local and remote data.
 
 ## Migration Plan
 
-Phase 1: Internal Store Routing
+Phase 1: Internal Store Routing And Service Modes
 
 - Introduce store IDs or item references.
 - Route existing local operations through the coordinator.
+- Add explicit local-app and cloud-Journal service modes.
+- Ensure cloud-mode migrations do not create app-wide settings, provider state,
+  or default local Journals.
+- Define per-cloud Trash behavior.
 - Keep behavior identical for local Journals.
 - Add tests proving local behavior is unchanged.
 
-Phase 2: OCI Provider And Artifact Format
+Phase 2: Portable Cloud Journal Format
+
+- Define cloud Journal database schema and validation.
+- Define cloud attachment metadata, local blob cache state, and lazy fetch
+  behavior.
+- Define portable cloud encryption records and new-device unlock behavior.
+- Add tests proving encrypted cloud Journal recovery works with only registry
+  artifacts and the matching master password.
+
+Phase 3: OCI Provider And Artifact Format
 
 - Add `cloud_providers`.
 - Implement OCI provider validation.
+- Record provider capabilities.
 - Implement revision config schema.
 - Implement revision artifact push/pull.
 - Implement digest verification.
 
-Phase 3: Mount And Open
+Phase 4: Mount And Open
 
 - Add `cloud_journal_mounts`.
+- Add pending cloud-create recovery state.
 - Add OCI tag discovery/open flow for new-device recovery.
 - Open cached cloud Journal DB through a `JournalService`.
 - Compose local and cloud Journals in `GetLibraryTree`.
 
-Phase 4: Locking
+Phase 5: Locking
 
 - Implement lock artifact create, renew, release, and force unlock.
 - Add read-only mode when another device owns the lock.
 - Add stale lock recovery.
+- Add explicit offline grace-period behavior.
 
-Phase 5: Publishing
+Phase 6: Publishing
 
 - Track dirty cloud sessions.
 - Publish revision artifacts after local flush and on shutdown.
 - Add conflict detection by `base_digest`.
-- Update current tags only after conflict checks pass.
+- Use conditional current-tag updates where provider capabilities allow.
+- Update current tags only after conflict checks pass, and preserve local
+  recovery copies when verification detects a race.
 
-Phase 6: UI
+Phase 7: UI
 
 - Add create-Journal storage choice and cloud status indicators.
 - Add Settings OCI provider management.
+- Show provider validation and capability status.
 - Add sync now, reconnect, and force unlock flows.
 - Separate local save state from OCI publish state.
 - Add configurable provider publish timing.
-
-Phase 7: Encryption Portability
-
-- Ensure encrypted cloud Journal key metadata is self-contained in the cloud
-  Journal DB or revision config.
-- Add tests for new-device recovery of encrypted cloud Journals.
 
 ## Test Plan
 
 Backend tests:
 
 - Local Journals still work with the coordinator.
+- Cloud Journal service mode does not create app-wide settings, provider state,
+  default local Journals, or unrelated root rows.
+- Cloud Journal validation accepts exactly one root Journal and the allowed
+  per-cloud system Trash shape.
 - Add multiple OCI providers.
 - Configure provider publish timing.
 - Configure provider revision retention, defaulting to 50.
+- Validate and record provider capabilities.
 - Create cloud Journal revision artifact.
+- Resume or recover a partially completed cloud Journal create.
 - Reconnect cloud Journal on a fresh local app database using only registry
   access.
+- Reconnect by explicit cloud Journal ID or current tag when tag listing is
+  unavailable.
 - Open, edit, flush, publish, and reopen cloud Journal.
 - Verify pulled SQLite layer digest and size.
 - Verify unchanged image attachments are not uploaded again after a text-only
@@ -1320,6 +1527,8 @@ Backend tests:
   text from opening.
 - Crash simulation before current tag update leaves previous revision current.
 - Remote current tag changed since `base_digest` blocks publish.
+- Provider without conditional tag updates preserves a local recovery copy if
+  post-update verification detects a race.
 - Lock acquisition succeeds with no valid lock.
 - Lock acquisition fails with active lock from another device.
 - Locked cloud Journal remains visible and opens read-only when possible.
@@ -1330,6 +1539,8 @@ Backend tests:
 - Encrypted cloud Journal unlock works on a new local app database with only the
   registry artifact and matching master password.
 - Encrypted cloud Journal unlock fails clearly with a different master password.
+- Changing the local app master password does not silently invalidate or rewrap
+  mounted encrypted cloud Journals.
 
 Frontend tests or manual verification:
 
@@ -1346,6 +1557,11 @@ Frontend tests or manual verification:
 ## First Iteration Decisions
 
 - Test and document quay.io first.
+- Treat cloud support as provider-capability based. Do not imply that every
+  OCI-compatible registry has identical locking, tag listing, tag deletion, or
+  conditional update behavior.
+- Implement portable cloud encryption before enabling encrypted cloud Journals,
+  or explicitly disable encryption for cloud Journals in the first release.
 - Keep revision retention configurable per provider, defaulting to 50 revisions.
 - Show locked cloud Journals in the tree as read-only when possible.
 - Provide a manual action to re-check whether a lock has been released.
