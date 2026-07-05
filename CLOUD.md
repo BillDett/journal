@@ -63,7 +63,8 @@ Required first-pass provider validation:
 
 Optional provider capabilities:
 
-- Delete tags or manifests.
+- Delete tags or manifests, recorded separately as
+  `supports_tag_delete_or_equivalent` and `supports_manifest_delete`.
 - Conditional manifest or tag updates using ETag, `If-Match`, or equivalent
   behavior.
 - Referrers API support.
@@ -338,8 +339,9 @@ Rules:
 - `revision_retention_count` controls how many revision tags should be retained
   per cloud Journal for this provider. The default is 50.
 - `capabilities_json` records provider behavior observed during validation, such
-  as tag listing support, tag deletion support, conditional update support, and
-  whether the provider returned useful manifest digests after pushes.
+  as tag listing support, `supports_tag_delete_or_equivalent`,
+  `supports_manifest_delete`, conditional update support, and whether the
+  provider returned useful manifest digests after pushes.
 - `last_rate_limited_at` and `last_rate_limit_retry_after_ms` record the most
   recent HTTP 429 response observed for this provider.
 - More than one provider row may exist at the same time.
@@ -1546,6 +1548,64 @@ Recommended first policy:
 
 Settings must expose provider-level revision retention.
 
+### Revision Retention Cleanup
+
+Retention cleanup runs after a successful publish and after the app has verified
+that the remote current tag resolves to the newly published revision. Cleanup
+must never block the publish from being considered successful. If cleanup fails,
+the app should record a warning and retry after a later successful publish.
+
+Cleanup algorithm:
+
+1. Determine the effective retention count:
+   - use `cloud_journal_mounts.revision_retention_count` when non-zero;
+   - otherwise use the provider's `revision_retention_count`;
+   - if the effective count is less than 1, treat it as 1.
+2. List repository tags and select tags matching:
+
+   ```text
+   journal-<cloudJournalId>-rev-*
+   ```
+
+3. Resolve the current tag and record the current manifest digest.
+4. Resolve each revision tag to its manifest descriptor and revision config when
+   possible.
+5. Sort revision tags by numeric revision from the tag suffix or revision config.
+6. Build the keep set:
+   - the tag and manifest currently referenced by `journal-<cloudJournalId>-current`;
+   - the latest `revision_retention_count` revision tags;
+   - any revision tag with a revision number greater than the current revision,
+     because this may indicate a race or partial recovery state;
+   - any revision involved in an active conflict, reconnect, or recovery flow.
+7. For revision tags outside the keep set, attempt cleanup only if the provider
+   supports it.
+8. Prefer tag deletion or tag-removal behavior when available.
+9. If the provider only supports manifest deletion by digest, delete a manifest
+   only after verifying that no kept tag, current tag, or lock tag resolves to
+   that same manifest digest.
+10. Do not delete blobs directly in the first implementation.
+
+Retention cleanup is best-effort. OCI registries vary in how tag deletion,
+manifest deletion, and garbage collection work. Some registries have no
+portable tag-delete operation. Some delete manifests by digest instead of
+removing a single tag. Some keep untagged blobs until server-side garbage
+collection. Therefore the retention setting means:
+
+```text
+The app attempts to keep only this many revision tags where provider cleanup
+capabilities allow it.
+```
+
+It does not guarantee that the registry stores only that many manifests or blobs.
+
+If provider validation shows that neither `supports_tag_delete_or_equivalent`
+nor `supports_manifest_delete` is available, Settings should show:
+
+```text
+Revision retention is configured, but this provider does not support deleting
+old revision tags or manifests. Old revisions may remain in the registry.
+```
+
 Registry caveat:
 
 - OCI registries vary in garbage collection behavior. Removing a tag may not
@@ -1677,6 +1737,12 @@ Backend tests:
 - Configure provider publish timing.
 - Configure provider revision retention, defaulting to 50.
 - Validate and record provider capabilities.
+- Verify revision retention cleanup keeps the current revision and latest
+  retained revision tags after a successful publish.
+- Verify revision retention cleanup does not delete manifests still referenced
+  by current, lock, conflict, or recovery state.
+- Verify providers without tag or manifest deletion support show a retention
+  warning and leave old revision tags/manifests untouched.
 - Create cloud Journal revision artifact.
 - Resume or recover a partially completed cloud Journal create.
 - Reconnect cloud Journal on a fresh local app database using only registry
