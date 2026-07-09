@@ -1,13 +1,25 @@
 import {Node, mergeAttributes} from '@tiptap/core'
 import {NodeViewWrapper, ReactNodeViewRenderer, type NodeViewProps} from '@tiptap/react'
-import {useEffect, useState} from 'react'
+import {useEffect, useRef, useState, type PointerEvent as ReactPointerEvent} from 'react'
 import {api, messageFromError} from '../wails/libraryApi'
 
-function AttachmentImageView({node, selected}: NodeViewProps) {
+const minImageWidthPercent = 15
+const maxImageWidthPercent = 100
+
+function clampImageWidthPercent(value: unknown) {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return null
+  return Math.min(maxImageWidthPercent, Math.max(minImageWidthPercent, value))
+}
+
+function AttachmentImageView({node, selected, updateAttributes}: NodeViewProps) {
   const attachmentId = String(node.attrs.attachmentId || '')
   const alt = String(node.attrs.alt || '')
+  const wrapperRef = useRef<HTMLDivElement | null>(null)
   const [src, setSrc] = useState('')
   const [error, setError] = useState('')
+  const [previewWidthPercent, setPreviewWidthPercent] = useState<number | null>(null)
+  const widthPercent = previewWidthPercent ?? clampImageWidthPercent(node.attrs.widthPercent)
+  const imageStyle = widthPercent === null ? undefined : {width: `${widthPercent}%`}
 
   useEffect(() => {
     let active = true
@@ -36,9 +48,70 @@ function AttachmentImageView({node, selected}: NodeViewProps) {
     }
   }, [attachmentId])
 
+  function startResize(event: ReactPointerEvent<HTMLButtonElement>, side: 'left' | 'right') {
+    const wrapper = wrapperRef.current
+    const editorPage = wrapper?.closest('.editor-page')
+    if (!wrapper || !(editorPage instanceof HTMLElement)) return
+
+    event.preventDefault()
+    event.stopPropagation()
+
+    const containerWidth = editorPage.getBoundingClientRect().width
+    if (containerWidth <= 0) return
+
+    const startX = event.clientX
+    const startWidth = wrapper.getBoundingClientRect().width
+    const pointerId = event.pointerId
+
+    event.currentTarget.setPointerCapture(pointerId)
+    document.body.classList.add('is-resizing-image')
+
+    const onPointerMove = (moveEvent: PointerEvent) => {
+      const delta = side === 'right' ? moveEvent.clientX - startX : startX - moveEvent.clientX
+      const width = Math.min(containerWidth, Math.max((containerWidth * minImageWidthPercent) / 100, startWidth + delta))
+      const nextPercent = Math.round((width / containerWidth) * 1000) / 10
+      setPreviewWidthPercent(nextPercent)
+    }
+
+    const finishResize = () => {
+      document.removeEventListener('pointermove', onPointerMove)
+      document.removeEventListener('pointerup', onPointerUp)
+      document.removeEventListener('pointercancel', onPointerCancel)
+      document.body.classList.remove('is-resizing-image')
+    }
+
+    const onPointerUp = (upEvent: PointerEvent) => {
+      finishResize()
+
+      const delta = side === 'right' ? upEvent.clientX - startX : startX - upEvent.clientX
+      const width = Math.min(containerWidth, Math.max((containerWidth * minImageWidthPercent) / 100, startWidth + delta))
+      const nextPercent = Math.round((width / containerWidth) * 1000) / 10
+      setPreviewWidthPercent(null)
+      updateAttributes({widthPercent: nextPercent})
+    }
+
+    const onPointerCancel = () => {
+      finishResize()
+      setPreviewWidthPercent(null)
+    }
+
+    document.addEventListener('pointermove', onPointerMove)
+    document.addEventListener('pointerup', onPointerUp, {once: true})
+    document.addEventListener('pointercancel', onPointerCancel, {once: true})
+  }
+
   return (
-    <NodeViewWrapper className={selected ? 'attachment-image selected' : 'attachment-image'}>
-      {src ? <img src={src} alt={alt}/> : <div className="attachment-image-placeholder">{error || 'Loading image...'}</div>}
+    <NodeViewWrapper
+      ref={wrapperRef}
+      className={selected ? 'attachment-image selected' : 'attachment-image'}
+      style={imageStyle}
+      data-image-width-percent={widthPercent ?? undefined}
+    >
+      <div className="attachment-image-frame">
+        {src ? <img src={src} alt={alt} draggable={false}/> : <div className="attachment-image-placeholder">{error || 'Loading image...'}</div>}
+        <button type="button" className="image-resize-handle left" tabIndex={selected ? 0 : -1} aria-label="Resize image from left" onPointerDown={(event) => startResize(event, 'left')}/>
+        <button type="button" className="image-resize-handle right" tabIndex={selected ? 0 : -1} aria-label="Resize image from right" onPointerDown={(event) => startResize(event, 'right')}/>
+      </div>
     </NodeViewWrapper>
   )
 }
@@ -61,6 +134,21 @@ export const AttachmentImage = Node.create({
         default: '',
         parseHTML: (element) => element.getAttribute('alt') || '',
         renderHTML: (attributes) => ({alt: attributes.alt || ''}),
+      },
+      widthPercent: {
+        default: null,
+        parseHTML: (element) => {
+          const value = Number.parseFloat(element.getAttribute('data-image-width-percent') || '')
+          return clampImageWidthPercent(value)
+        },
+        renderHTML: (attributes) => {
+          const widthPercent = clampImageWidthPercent(attributes.widthPercent)
+          if (widthPercent === null) return {}
+          return {
+            'data-image-width-percent': String(widthPercent),
+            style: `width: ${widthPercent}%;`,
+          }
+        },
       },
     }
   },

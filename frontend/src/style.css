@@ -638,20 +638,73 @@ body.is-resizing-library {
 
 .attachment-image {
   display: block;
+  width: fit-content;
+  max-width: 100%;
   margin: 0.8em 0;
+}
+
+.attachment-image-frame {
+  position: relative;
+  display: inline-block;
+  width: 100%;
+  max-width: 100%;
+  line-height: 0;
 }
 
 .attachment-image img {
   display: block;
+  width: 100%;
   max-width: 100%;
   height: auto;
   border-radius: 6px;
+  user-select: none;
+}
+
+.attachment-image:not([data-image-width-percent]) .attachment-image-frame,
+.attachment-image:not([data-image-width-percent]) img {
+  width: auto;
 }
 
 .attachment-image.selected img,
 .ProseMirror-selectednode.attachment-image img {
   outline: 3px solid rgba(18, 111, 145, 0.28);
   outline-offset: 3px;
+}
+
+.image-resize-handle {
+  position: absolute;
+  top: 50%;
+  width: 14px;
+  height: 34px;
+  padding: 0;
+  border: 1px solid #8cbdb6;
+  border-radius: 999px;
+  background: #ffffff;
+  box-shadow: 0 4px 10px rgba(43, 48, 56, 0.16);
+  cursor: ew-resize;
+  opacity: 0;
+  transform: translateY(-50%);
+  transition: opacity 120ms ease;
+}
+
+.image-resize-handle.left {
+  left: -7px;
+}
+
+.image-resize-handle.right {
+  right: -7px;
+}
+
+.attachment-image.selected .image-resize-handle,
+.attachment-image:hover .image-resize-handle,
+.attachment-image:focus-within .image-resize-handle {
+  opacity: 1;
+}
+
+body.is-resizing-image,
+body.is-resizing-image * {
+  cursor: ew-resize;
+  user-select: none;
 }
 
 .attachment-image-placeholder {
