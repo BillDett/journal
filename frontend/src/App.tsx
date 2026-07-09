@@ -29,7 +29,6 @@ import {
   Table2,
   TableProperties,
   Trash2,
-  Type,
   Underline as UnderlineIcon,
   Undo2,
   Unlock,
@@ -50,6 +49,8 @@ import appIcon from './assets/appicon.png'
 import {BrowserOpenURL, EventsOn} from '../wailsjs/runtime/runtime'
 
 type SaveState = 'idle' | 'dirty' | 'saving' | 'saved' | 'error'
+type HeadingLevel = 1 | 2 | 3 | 4 | 5 | 6
+type ParagraphStyle = 'normal' | `heading-${HeadingLevel}`
 
 const libraryWidthMin = 260
 const libraryWidthDefault = 340
@@ -916,6 +917,7 @@ function EditorPane({document, focusTitle = false, saveState, status, onDraft, o
   const [linkPopover, setLinkPopover] = useState<LinkPopoverState | null>(null)
   const [canCreateLink, setCanCreateLink] = useState(false)
   const [isTableActive, setIsTableActive] = useState(false)
+  const [paragraphStyle, setParagraphStyle] = useState<ParagraphStyle>('normal')
   const titleInputRef = useRef<HTMLInputElement | null>(null)
   const imageInputRef = useRef<HTMLInputElement | null>(null)
   const editorRef = useRef<Editor | null>(null)
@@ -943,6 +945,7 @@ function EditorPane({document, focusTitle = false, saveState, status, onDraft, o
   const updateEditorControls = useCallback((editor: Editor) => {
     setCanCreateLink(!editor.state.selection.empty)
     setIsTableActive(editor.isActive('table'))
+    setParagraphStyle(activeParagraphStyle(editor))
   }, [])
 
   const editor = useEditor({
@@ -1158,6 +1161,7 @@ function EditorPane({document, focusTitle = false, saveState, status, onDraft, o
             editor={editor}
             canCreateLink={canCreateLink}
             isTableActive={isTableActive}
+            paragraphStyle={paragraphStyle}
             spacingPreset={document.spacingPreset ?? 'compact'}
             onCreateLink={openCreateLinkPopover}
             onInsertImage={openImageFilePicker}
@@ -1303,10 +1307,18 @@ function openExternalLink(value: string) {
   window.open(href, '_blank', 'noopener,noreferrer')
 }
 
+function activeParagraphStyle(editor: Editor): ParagraphStyle {
+  for (const level of [1, 2, 3, 4, 5, 6] as const) {
+    if (editor.isActive('heading', {level})) return `heading-${level}`
+  }
+  return 'normal'
+}
+
 type EditorToolbarProps = {
   editor: Editor | null
   canCreateLink: boolean
   isTableActive: boolean
+  paragraphStyle: ParagraphStyle
   disabled?: boolean
   spacingPreset: SpacingPreset
   onCreateLink: () => void
@@ -1314,16 +1326,41 @@ type EditorToolbarProps = {
   onSpacingPresetChange: (spacingPreset: SpacingPreset) => void
 }
 
-function EditorToolbar({editor, canCreateLink, isTableActive, disabled = false, spacingPreset, onCreateLink, onInsertImage, onSpacingPresetChange}: EditorToolbarProps) {
+function EditorToolbar({editor, canCreateLink, isTableActive, paragraphStyle, disabled = false, spacingPreset, onCreateLink, onInsertImage, onSpacingPresetChange}: EditorToolbarProps) {
   const blocked = disabled || !editor
   const linkBlocked = blocked || !canCreateLink
   const insertTable = () => {
     editor?.chain().focus().insertTable({rows: 3, cols: 3, withHeaderRow: true}).setTableWidthPercent(75).run()
   }
+  const setParagraphStyle = (style: ParagraphStyle) => {
+    if (!editor) return
+    if (style === 'normal') {
+      editor.chain().focus().setParagraph().run()
+      return
+    }
+
+    const level = Number(style.replace('heading-', '')) as HeadingLevel
+    editor.chain().focus().setHeading({level}).run()
+  }
   return (
     <div className="format-toolbar" aria-label="Formatting">
       <div className="toolbar-group">
-        <Tool disabled={blocked} active={editor?.isActive('heading', {level: 1})} label="Heading" onClick={() => editor?.chain().focus().toggleHeading({level: 1}).run()}><Type size={16}/></Tool>
+        <label className="paragraph-style-control" title="Paragraph style">
+          <select
+            value={paragraphStyle}
+            disabled={blocked}
+            onChange={(event) => setParagraphStyle(event.target.value as ParagraphStyle)}
+            aria-label="Paragraph style"
+          >
+            <option value="normal">Normal</option>
+            <option value="heading-1">Header 1</option>
+            <option value="heading-2">Header 2</option>
+            <option value="heading-3">Header 3</option>
+            <option value="heading-4">Header 4</option>
+            <option value="heading-5">Header 5</option>
+            <option value="heading-6">Header 6</option>
+          </select>
+        </label>
         <Tool disabled={blocked} active={editor?.isActive('bold')} label="Bold" onClick={() => editor?.chain().focus().toggleBold().run()}><Bold size={16}/></Tool>
         <Tool disabled={blocked} active={editor?.isActive('italic')} label="Italic" onClick={() => editor?.chain().focus().toggleItalic().run()}><Italic size={16}/></Tool>
         <Tool disabled={blocked} active={editor?.isActive('underline')} label="Underline" onClick={() => editor?.chain().focus().toggleUnderline().run()}><UnderlineIcon size={16}/></Tool>
