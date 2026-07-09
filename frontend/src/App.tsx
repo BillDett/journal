@@ -1002,6 +1002,15 @@ function EditorPane({document, focusTitle = false, saveState, status, onDraft, o
         return true
       },
       handleDOMEvents: {
+        paste: (view, event) => {
+          const files = imageFilesFromClipboard(event.clipboardData)
+          if (files.length === 0) return false
+
+          event.preventDefault()
+          view.focus()
+          void insertImageFiles(files, view.state.selection.from)
+          return true
+        },
         drop: (view, event) => {
           const droppedFiles = Array.from(event.dataTransfer?.files ?? [])
           if (droppedFiles.length === 0) return false
@@ -1291,6 +1300,46 @@ function formatTimestamp(value: string) {
   const date = new Date(value)
   if (Number.isNaN(date.valueOf())) return value
   return new Intl.DateTimeFormat(undefined, {dateStyle: 'medium', timeStyle: 'short'}).format(date)
+}
+
+function imageFilesFromClipboard(data: DataTransfer | null) {
+  if (!data) return []
+
+  const files: File[] = []
+  for (const item of Array.from(data.items)) {
+    if (item.kind !== 'file' || !item.type.startsWith('image/')) continue
+    const file = item.getAsFile()
+    if (file) files.push(withClipboardImageName(file, files.length + 1))
+  }
+
+  if (files.length > 0) return files
+
+  return Array.from(data.files)
+    .filter((file) => file.type.startsWith('image/'))
+    .map((file, index) => withClipboardImageName(file, index + 1))
+}
+
+function withClipboardImageName(file: File, index: number) {
+  if (file.name.trim()) return file
+  const extension = imageExtensionForType(file.type)
+  return new File([file], `Pasted image ${index}.${extension}`, {
+    type: file.type,
+    lastModified: file.lastModified,
+  })
+}
+
+function imageExtensionForType(type: string) {
+  switch (type) {
+    case 'image/jpeg':
+      return 'jpg'
+    case 'image/gif':
+      return 'gif'
+    case 'image/webp':
+      return 'webp'
+    case 'image/png':
+    default:
+      return 'png'
+  }
 }
 
 function normalizeLinkURL(value: string) {
