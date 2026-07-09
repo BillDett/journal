@@ -383,6 +383,148 @@ func TestEncryptedDocumentImageAttachmentLifecycle(t *testing.T) {
 	}
 }
 
+func TestDuplicateDocumentCopiesDraftSpacingAndAttachments(t *testing.T) {
+	service := newTestService(t)
+
+	folder, err := service.CreateFolder("", "Drafts")
+	if err != nil {
+		t.Fatalf("create folder: %v", err)
+	}
+	doc, err := service.CreateDocument(folder.Item.ID)
+	if err != nil {
+		t.Fatalf("create document: %v", err)
+	}
+	if _, err := service.RenameItem(doc.ID, "Launch Notes"); err != nil {
+		t.Fatalf("rename document: %v", err)
+	}
+	if _, err := service.UpdateDocumentSpacing(doc.ID, "relaxed"); err != nil {
+		t.Fatalf("update spacing: %v", err)
+	}
+	attachment, err := service.createDocumentAttachment(doc.ID, "note.png", "image/png", []byte{0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d})
+	if err != nil {
+		t.Fatalf("create attachment: %v", err)
+	}
+	content := map[string]any{
+		"type": "doc",
+		"content": []any{
+			map[string]any{
+				"type": "paragraph",
+				"content": []any{
+					map[string]any{"type": "text", "text": "Pending duplicate text"},
+				},
+			},
+			map[string]any{
+				"type": "attachmentImage",
+				"attrs": map[string]any{
+					"attachmentId": attachment.ID,
+					"alt":          "note.png",
+				},
+			},
+		},
+	}
+	if _, err := service.UpdateDocumentDraft(doc.ID, content, 1); err != nil {
+		t.Fatalf("pending draft: %v", err)
+	}
+
+	copied, err := service.DuplicateDocument(doc.ID)
+	if err != nil {
+		t.Fatalf("duplicate document: %v", err)
+	}
+	if copied.ID == doc.ID || copied.Title != "Copy of Launch Notes" || copied.Item.ParentID != folder.Item.ID {
+		t.Fatalf("unexpected copied document metadata: %#v", copied)
+	}
+	if copied.SpacingPreset != "relaxed" {
+		t.Fatalf("expected copied spacing relaxed, got %q", copied.SpacingPreset)
+	}
+	if text := extractText(copied.Content); text != "Pending duplicate text" {
+		t.Fatalf("expected pending draft text, got %q", text)
+	}
+	copiedAttachmentIDs := attachmentIDsFromContent(copied.Content)
+	if copiedAttachmentIDs[attachment.ID] || len(copiedAttachmentIDs) != 1 {
+		t.Fatalf("expected copied content to reference one new attachment, got %#v", copiedAttachmentIDs)
+	}
+	for copiedAttachmentID := range copiedAttachmentIDs {
+		data, err := service.GetDocumentAttachmentDataURL(copiedAttachmentID)
+		if err != nil {
+			t.Fatalf("get copied attachment: %v", err)
+		}
+		if !strings.HasPrefix(data.DataURL, "data:image/png;base64,") {
+			t.Fatalf("expected copied png data url, got %q", data.DataURL)
+		}
+	}
+}
+
+func TestDuplicateEncryptedDocumentKeepsEncryptedCopyAndAttachments(t *testing.T) {
+	service := newTestService(t)
+
+	if err := service.CreateMasterPassword("correct horse battery staple"); err != nil {
+		t.Fatalf("create master password: %v", err)
+	}
+	if err := service.UnlockEncryption("correct horse battery staple"); err != nil {
+		t.Fatalf("unlock: %v", err)
+	}
+	tree, err := service.GetLibraryTree()
+	if err != nil {
+		t.Fatalf("tree: %v", err)
+	}
+	journal := tree.Items[0]
+	if _, err := service.EncryptJournal(journal.ID); err != nil {
+		t.Fatalf("encrypt journal: %v", err)
+	}
+	doc, err := service.CreateDocument(journal.ID)
+	if err != nil {
+		t.Fatalf("create encrypted document: %v", err)
+	}
+	if _, err := service.RenameItem(doc.ID, "Secret Note"); err != nil {
+		t.Fatalf("rename encrypted document: %v", err)
+	}
+	attachment, err := service.createDocumentAttachment(doc.ID, "secret.png", "image/png", []byte{0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d})
+	if err != nil {
+		t.Fatalf("create encrypted attachment: %v", err)
+	}
+	content := map[string]any{
+		"type": "doc",
+		"content": []any{
+			map[string]any{
+				"type": "paragraph",
+				"content": []any{
+					map[string]any{"type": "text", "text": "Secret duplicate text"},
+				},
+			},
+			map[string]any{
+				"type": "attachmentImage",
+				"attrs": map[string]any{
+					"attachmentId": attachment.ID,
+					"alt":          "secret.png",
+				},
+			},
+		},
+	}
+	if _, err := service.UpdateDocumentDraft(doc.ID, content, 1); err != nil {
+		t.Fatalf("pending encrypted draft: %v", err)
+	}
+
+	copied, err := service.DuplicateDocument(doc.ID)
+	if err != nil {
+		t.Fatalf("duplicate encrypted document: %v", err)
+	}
+	if copied.Title != "Copy of Secret Note" || copied.Item.EncryptionState != EncryptionEncrypted {
+		t.Fatalf("unexpected encrypted copy metadata: %#v", copied)
+	}
+	if text := extractText(copied.Content); text != "Secret duplicate text" {
+		t.Fatalf("expected encrypted draft text, got %q", text)
+	}
+	copiedAttachmentIDs := attachmentIDsFromContent(copied.Content)
+	if copiedAttachmentIDs[attachment.ID] || len(copiedAttachmentIDs) != 1 {
+		t.Fatalf("expected copied encrypted content to reference one new attachment, got %#v", copiedAttachmentIDs)
+	}
+	for copiedAttachmentID := range copiedAttachmentIDs {
+		if _, err := service.GetDocumentAttachmentDataURL(copiedAttachmentID); err != nil {
+			t.Fatalf("get copied encrypted attachment: %v", err)
+		}
+	}
+}
+
 func TestCreateAndRenameDocumentInEncryptedJournal(t *testing.T) {
 	service := newTestService(t)
 

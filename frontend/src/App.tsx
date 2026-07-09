@@ -10,6 +10,7 @@ import {
   ChevronRight,
   FilePlus,
   FileText,
+  Files,
   Folder,
   FolderPlus,
   Highlighter,
@@ -63,6 +64,8 @@ type DeleteTarget = {
   inTrash: boolean
 } | null
 
+type DuplicateTarget = TreeItem | null
+
 type DecryptTarget = TreeItem | null
 
 type LinkPopoverState = {
@@ -101,6 +104,7 @@ function App() {
   const [autosaveInterval, setAutosaveInterval] = useState(2000)
   const [draggedId, setDraggedId] = useState('')
   const [deleteTarget, setDeleteTarget] = useState<DeleteTarget>(null)
+  const [duplicateTarget, setDuplicateTarget] = useState<DuplicateTarget>(null)
   const [decryptTarget, setDecryptTarget] = useState<DecryptTarget>(null)
   const [encryptedNotice, setEncryptedNotice] = useState('')
   const [encryptionDialog, setEncryptionDialog] = useState<EncryptionDialogState>(null)
@@ -375,6 +379,26 @@ function App() {
       const response = await api.CreateDocument(parentId)
       setTitleFocusDocumentId(response.id)
       showDocument(response, 'Created document')
+    } catch (error) {
+      setLastError(messageFromError(error))
+    }
+  }
+
+  function requestDuplicateDocument(id: string) {
+    const item = flattened.find((entry) => entry.id === id)
+    if (!item || item.kind !== 'document' || isDescendantOf(flattened, id, trashId)) return
+    setSelectedItemId(id)
+    setDuplicateTarget(item)
+  }
+
+  async function confirmDuplicateDocument() {
+    if (!duplicateTarget) return
+    const id = duplicateTarget.id
+    setDuplicateTarget(null)
+    if (activeDoc?.id === id && !(await flushActive())) return
+    try {
+      const response = await api.DuplicateDocument(id)
+      showDocument(response, 'Duplicated document')
     } catch (error) {
       setLastError(messageFromError(error))
     }
@@ -764,6 +788,7 @@ function App() {
                   onRenameCommit={(id, title) => void renameItem(id, title)}
                   onDelete={requestDelete}
                   onCreateDocument={(id) => void createDocument(id)}
+                  onDuplicateDocument={requestDuplicateDocument}
                   onCreateFolder={(id) => void createFolder(id)}
                   onEncryptJournal={(id) => void encryptJournal(id)}
                   onDecryptJournal={(id) => void decryptJournal(id)}
@@ -860,6 +885,14 @@ function App() {
               target={deleteTarget}
               onCancel={() => setDeleteTarget(null)}
               onConfirm={() => void confirmDelete()}
+            />
+          )}
+
+          {duplicateTarget && (
+            <DuplicateDialog
+              target={duplicateTarget}
+              onCancel={() => setDuplicateTarget(null)}
+              onConfirm={() => void confirmDuplicateDocument()}
             />
           )}
 
@@ -1463,6 +1496,7 @@ type TreeNodeProps = {
   onRenameCommit: (id: string, title: string) => void
   onDelete: (id: string) => void
   onCreateDocument: (id: string) => void
+  onDuplicateDocument: (id: string) => void
   onCreateFolder: (id: string) => void
   onEncryptJournal: (id: string) => void
   onDecryptJournal: (id: string) => void
@@ -1566,6 +1600,10 @@ function TreeNode(props: TreeNodeProps) {
             event.stopPropagation()
             props.onCreateDocument(item.id)
           }} disabled={props.creationDisabled || isLockedJournal} title="New document"><Plus size={13}/></button>}
+          {item.kind === 'document' && !isTrash && <button type="button" onClick={(event) => {
+            event.stopPropagation()
+            props.onDuplicateDocument(item.id)
+          }} title="Duplicate document"><Files size={13}/></button>}
           {isContainer && !isTrash && <button type="button" onClick={(event) => {
             event.stopPropagation()
             props.onCreateFolder(item.id)
@@ -1665,6 +1703,29 @@ function DeleteDialog({target, onCancel, onConfirm}: {target: NonNullable<Delete
         <div className="dialog-actions">
           <button type="button" onClick={onCancel}>Cancel</button>
           <button type="button" className={target.item.kind === 'journal' || target.inTrash ? 'danger-action' : ''} onClick={onConfirm}>{action}</button>
+        </div>
+      </section>
+    </div>
+  )
+}
+
+function DuplicateDialog({target, onCancel, onConfirm}: {target: TreeItem, onCancel: () => void, onConfirm: () => void}) {
+  useEffect(() => {
+    function onKeyDown(event: KeyboardEvent) {
+      if (event.key === 'Escape') onCancel()
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [onCancel])
+
+  return (
+    <div className="dialog-backdrop" role="presentation" onMouseDown={onCancel}>
+      <section className="confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="duplicate-title" onMouseDown={(event) => event.stopPropagation()}>
+        <h2 id="duplicate-title">Duplicate "{target.title}"?</h2>
+        <p>This will create a new document named "Copy of {target.title}" in the same location.</p>
+        <div className="dialog-actions">
+          <button type="button" onClick={onCancel}>Cancel</button>
+          <button type="button" onClick={onConfirm}>Duplicate</button>
         </div>
       </section>
     </div>

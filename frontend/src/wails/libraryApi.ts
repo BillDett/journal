@@ -93,6 +93,7 @@ type BackendAPI = {
   GetAppInfo: () => Promise<AppInfo>
   GetLibraryTree: () => Promise<TreeResponse>
   CreateDocument: (parentId: string) => Promise<DocumentResponse>
+  DuplicateDocument: (id: string) => Promise<DocumentResponse>
   CreateFolder: (parentId: string, title: string) => Promise<ItemResponse>
   CreateJournal: (title: string) => Promise<ItemResponse>
   RenameItem: (id: string, title: string) => Promise<ItemResponse>
@@ -145,6 +146,7 @@ function missingBackend(): BackendAPI {
     }),
     GetLibraryTree: fail,
     CreateDocument: fail,
+    DuplicateDocument: fail,
     CreateFolder: fail,
     CreateJournal: fail,
     RenameItem: fail,

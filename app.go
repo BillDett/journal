@@ -89,6 +89,10 @@ func (a *App) CreateDocument(parentID string) (DocumentResponse, error) {
 	return a.service.CreateDocument(parentID)
 }
 
+func (a *App) DuplicateDocument(id string) (DocumentResponse, error) {
+	return a.service.DuplicateDocument(id)
+}
+
 func (a *App) CreateFolder(parentID string, title string) (ItemResponse, error) {
 	return a.service.CreateFolder(parentID, title)
 }
@@ -849,6 +853,157 @@ func (s *JournalService) CreateDocument(parentID string) (DocumentResponse, erro
 		return DocumentResponse{}, err
 	}
 	return s.OpenDocument(id)
+}
+
+func (s *JournalService) DuplicateDocument(id string) (DocumentResponse, error) {
+	id = strings.TrimSpace(id)
+	rawItem, err := s.getRawRowItemFrom(s.db, id)
+	if err != nil {
+		return DocumentResponse{}, err
+	}
+	if rawItem.Kind != KindDocument {
+		return DocumentResponse{}, fmt.Errorf("item is not a document")
+	}
+	parentID := ""
+	if rawItem.ParentID.Valid {
+		parentID = rawItem.ParentID.String
+	}
+	displayItem, err := s.prepareItemForDisplay(rawItem)
+	if err != nil {
+		return DocumentResponse{}, err
+	}
+	title := "Copy of " + displayItem.Title
+	now := nowString()
+	newID := uuid.NewString()
+	order, err := s.nextSortOrder(parentID)
+	if err != nil {
+		return DocumentResponse{}, err
+	}
+
+	var schemaVersion int
+	var encoded string
+	var contentCiphertext []byte
+	var spacingPreset string
+	var key []byte
+	keyID := ""
+	if rawItem.EncryptionState == EncryptionEncrypted {
+		journalID, err := s.journalIDForItem(id)
+		if err != nil {
+			return DocumentResponse{}, err
+		}
+		var ok bool
+		key, ok = s.journalKey(journalID)
+		if !ok {
+			return DocumentResponse{}, ErrEncryptionLocked
+		}
+		if !rawItem.EncryptionKeyID.Valid {
+			return DocumentResponse{}, fmt.Errorf("encrypted document key is missing")
+		}
+		keyID = rawItem.EncryptionKeyID.String
+		if err := s.db.QueryRow(
+			`SELECT schema_version, content_ciphertext, spacing_preset FROM documents WHERE item_id = ?`,
+			id,
+		).Scan(&schemaVersion, &contentCiphertext, &spacingPreset); err != nil {
+			return DocumentResponse{}, err
+		}
+		plaintext, err := openField(key, "documents", id, "content_json", keyID, contentCiphertext)
+		if err != nil {
+			return DocumentResponse{}, err
+		}
+		encoded = string(plaintext)
+	} else {
+		if err := s.db.QueryRow(
+			`SELECT schema_version, content_json, spacing_preset FROM documents WHERE item_id = ?`,
+			id,
+		).Scan(&schemaVersion, &encoded, &spacingPreset); err != nil {
+			return DocumentResponse{}, err
+		}
+	}
+	if draft, ok := s.pendingDraftSnapshot(id); ok {
+		data, err := json.Marshal(draft.Content)
+		if err != nil {
+			return DocumentResponse{}, err
+		}
+		encoded = string(data)
+	}
+	var content map[string]any
+	if err := json.Unmarshal([]byte(encoded), &content); err != nil {
+		return DocumentResponse{}, err
+	}
+
+	storedTitle := title
+	contentJSON := encoded
+	var titleCiphertext []byte
+	encryptionState := rawItem.EncryptionState
+	if encryptionState == "" {
+		encryptionState = EncryptionPlaintext
+	}
+	encryptionKeyID := sql.NullString{}
+	if encryptionState == EncryptionEncrypted {
+		encryptionKeyID = sql.NullString{String: keyID, Valid: true}
+		titleCiphertext, err = sealField(key, "items", newID, "title", keyID, []byte(title))
+		if err != nil {
+			return DocumentResponse{}, err
+		}
+		contentCiphertext, err = sealField(key, "documents", newID, "content_json", keyID, []byte(encoded))
+		if err != nil {
+			return DocumentResponse{}, err
+		}
+		storedTitle = encryptedTitlePlaceholder(KindDocument)
+		placeholder, _ := json.Marshal(emptyDocument())
+		contentJSON = string(placeholder)
+	} else {
+		contentCiphertext = nil
+	}
+
+	tx, err := s.db.Begin()
+	if err != nil {
+		return DocumentResponse{}, err
+	}
+	defer rollback(tx)
+
+	if _, err := tx.Exec(
+		`INSERT INTO items (id, parent_id, kind, title, sort_order, created_at, updated_at, encryption_state, encryption_key_id, title_ciphertext)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		newID, parentID, KindDocument, storedTitle, order, now, now, encryptionState, encryptionKeyID, titleCiphertext,
+	); err != nil {
+		return DocumentResponse{}, err
+	}
+	if _, err := tx.Exec(
+		`INSERT INTO documents (item_id, schema_version, content_json, content_ciphertext, spacing_preset, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		newID, schemaVersion, contentJSON, contentCiphertext, normalizeSpacingPreset(spacingPreset), now, now,
+	); err != nil {
+		return DocumentResponse{}, err
+	}
+	attachmentIDMap, err := s.copyDocumentAttachmentsForDuplicateTx(tx, id, newID, encryptionState == EncryptionEncrypted, key, keyID)
+	if err != nil {
+		return DocumentResponse{}, err
+	}
+	if len(attachmentIDMap) > 0 {
+		encodedContent, err := json.Marshal(remapAttachmentIDsInContent(content, attachmentIDMap))
+		if err != nil {
+			return DocumentResponse{}, err
+		}
+		if encryptionState == EncryptionEncrypted {
+			contentCiphertext, err = sealField(key, "documents", newID, "content_json", keyID, encodedContent)
+			if err != nil {
+				return DocumentResponse{}, err
+			}
+			if _, err := tx.Exec(`UPDATE documents SET content_ciphertext = ? WHERE item_id = ?`, contentCiphertext, newID); err != nil {
+				return DocumentResponse{}, err
+			}
+		} else if _, err := tx.Exec(`UPDATE documents SET content_json = ? WHERE item_id = ?`, string(encodedContent), newID); err != nil {
+			return DocumentResponse{}, err
+		}
+	}
+	if err := s.syncFTSTx(tx, newID); err != nil {
+		return DocumentResponse{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return DocumentResponse{}, err
+	}
+	return s.OpenDocument(newID)
 }
 
 func (s *JournalService) CreateFolder(parentID string, title string) (ItemResponse, error) {
@@ -2644,6 +2799,57 @@ func (s *JournalService) copyDocumentAttachmentsTx(tx *sql.Tx, sourceDocumentID 
 			contentBlob = plaintext
 			contentCiphertext = nil
 			sizeBytes = len(plaintext)
+		}
+		if _, err := tx.Exec(
+			`INSERT INTO document_attachments (id, document_id, mime_type, original_name, size_bytes, content_blob, content_ciphertext, created_at)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+			newID, targetDocumentID, mimeType, originalName, sizeBytes, contentBlob, contentCiphertext, now,
+		); err != nil {
+			return nil, err
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return idMap, nil
+}
+
+func (s *JournalService) copyDocumentAttachmentsForDuplicateTx(tx *sql.Tx, sourceDocumentID string, targetDocumentID string, encrypted bool, key []byte, keyID string) (map[string]string, error) {
+	rows, err := tx.Query(
+		`SELECT id, mime_type, original_name, size_bytes, content_blob, content_ciphertext
+		 FROM document_attachments WHERE document_id = ? AND detached_at IS NULL`,
+		sourceDocumentID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	idMap := map[string]string{}
+	now := nowString()
+	for rows.Next() {
+		var oldID, mimeType, originalName string
+		var sizeBytes int
+		var contentBlob []byte
+		var contentCiphertext []byte
+		if err := rows.Scan(&oldID, &mimeType, &originalName, &sizeBytes, &contentBlob, &contentCiphertext); err != nil {
+			return nil, err
+		}
+		newID := uuid.NewString()
+		idMap[oldID] = newID
+		if encrypted {
+			plaintext, err := openField(key, "document_attachments", oldID, "content_blob", keyID, contentCiphertext)
+			if err != nil {
+				return nil, err
+			}
+			contentCiphertext, err = sealField(key, "document_attachments", newID, "content_blob", keyID, plaintext)
+			if err != nil {
+				return nil, err
+			}
+			contentBlob = nil
+			sizeBytes = len(plaintext)
+		} else {
+			contentCiphertext = nil
 		}
 		if _, err := tx.Exec(
 			`INSERT INTO document_attachments (id, document_id, mime_type, original_name, size_bytes, content_blob, content_ciphertext, created_at)
