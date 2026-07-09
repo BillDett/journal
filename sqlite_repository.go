@@ -4,6 +4,8 @@ import (
 	"database/sql"
 	"os"
 	"path/filepath"
+
+	_ "modernc.org/sqlite"
 )
 
 // SQLiteRepository owns process-local database configuration and lifecycle.
