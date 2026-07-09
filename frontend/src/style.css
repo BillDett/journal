@@ -507,21 +507,37 @@ body.is-resizing-library {
 
 .document-head {
   display: grid;
-  grid-template-columns: minmax(240px, 1fr) auto;
-  align-items: center;
-  gap: 12px;
+  grid-template-columns: minmax(0, 1fr);
+  align-items: start;
+  gap: 10px;
   padding: 18px 28px 12px;
 }
 
 .title-input {
+  width: 100%;
   min-width: 0;
   border: 0;
   background: transparent;
   color: var(--ink);
-  font-size: 28px;
+  font-size: 32px;
   font-weight: 720;
+  line-height: 1.12;
   letter-spacing: 0;
   outline: 0;
+}
+
+.document-toolbar-row {
+  min-width: 0;
+  width: 100%;
+}
+
+.document-toolbar-row .format-toolbar {
+  width: 100%;
+  row-gap: 8px;
+}
+
+.document-toolbar-row .toolbar-group {
+  flex-wrap: wrap;
 }
 
 .paper-scroll {
@@ -1048,11 +1064,6 @@ body.is-resizing-table * {
 }
 
 @media (max-width: 1100px) {
-  .format-toolbar {
-    grid-column: 1 / -1;
-    display: none;
-  }
-
   .document-head {
     grid-template-columns: 1fr;
   }

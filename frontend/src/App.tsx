@@ -1153,15 +1153,17 @@ function EditorPane({document, focusTitle = false, saveState, status, onDraft, o
             void insertImageFiles(files)
           }}
         />
-        <EditorToolbar
-          editor={editor}
-          canCreateLink={canCreateLink}
-          isTableActive={isTableActive}
-          spacingPreset={document.spacingPreset ?? 'compact'}
-          onCreateLink={openCreateLinkPopover}
-          onInsertImage={openImageFilePicker}
-          onSpacingPresetChange={onSpacingPresetChange}
-        />
+        <div className="document-toolbar-row">
+          <EditorToolbar
+            editor={editor}
+            canCreateLink={canCreateLink}
+            isTableActive={isTableActive}
+            spacingPreset={document.spacingPreset ?? 'compact'}
+            onCreateLink={openCreateLinkPopover}
+            onInsertImage={openImageFilePicker}
+            onSpacingPresetChange={onSpacingPresetChange}
+          />
+        </div>
       </div>
       <div className="paper-scroll" onBlur={flushEditor}>
         <EditorContent editor={editor}/>
