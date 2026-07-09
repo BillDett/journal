@@ -2,10 +2,12 @@ package main
 
 import (
 	"database/sql"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -234,11 +236,168 @@ func TestDocumentLifecycleSearchAndTrash(t *testing.T) {
 	if len(results.ResultIDs) != 0 || findTreeItem(results.Items, tree.TrashID) != nil {
 		t.Fatalf("expected trash to be excluded from search, got ids=%#v items=%#v", results.ResultIDs, results.Items)
 	}
-	if _, err := service.MoveItemToTrash(doc.ID); err != nil {
+	if _, err := service.TrashItem(TrashItemCommand{ID: doc.ID, ExpectedInTrash: true}); err != nil {
 		t.Fatalf("delete from trash: %v", err)
 	}
 	if _, err := service.OpenDocument(doc.ID); err == nil {
 		t.Fatal("expected permanent delete to remove document")
+	}
+}
+
+func TestTrashItemRejectsRepeatedConcurrentRequests(t *testing.T) {
+	service := newTestService(t)
+	doc, err := service.CreateDocument("")
+	if err != nil {
+		t.Fatalf("create document: %v", err)
+	}
+
+	start := make(chan struct{})
+	errs := make(chan error, 2)
+	var wg sync.WaitGroup
+	for range 2 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			_, err := service.TrashItem(TrashItemCommand{ID: doc.ID, ExpectedInTrash: false})
+			errs <- err
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(errs)
+
+	successes := 0
+	for err := range errs {
+		if err == nil {
+			successes++
+		}
+	}
+	if successes != 1 {
+		t.Fatalf("expected one accepted trash transition, got %d", successes)
+	}
+	if _, err := service.OpenDocument(doc.ID); err != nil {
+		t.Fatalf("document should remain recoverable after repeated trash request: %v", err)
+	}
+	if _, err := service.TrashItem(TrashItemCommand{ID: doc.ID, ExpectedInTrash: true}); err != nil {
+		t.Fatalf("explicit permanent delete: %v", err)
+	}
+}
+
+func TestImportRejectsEscapingManifestPath(t *testing.T) {
+	service := newTestService(t)
+	rootDir := t.TempDir()
+	sourceDir := filepath.Join(rootDir, "source")
+	outsideDir := filepath.Join(rootDir, "outside")
+	if err := os.MkdirAll(sourceDir, 0o755); err != nil {
+		t.Fatalf("create source directory: %v", err)
+	}
+	if err := os.MkdirAll(outsideDir, 0o755); err != nil {
+		t.Fatalf("create outside directory: %v", err)
+	}
+	outsidePath := filepath.Join(outsideDir, "outside.md")
+	if err := os.WriteFile(outsidePath, []byte("private"), 0o600); err != nil {
+		t.Fatalf("write outside markdown: %v", err)
+	}
+	manifest := `{"version":1,"journalTitle":"Unsafe","nodes":[{"kind":"document","title":"Outside","file":"../outside/outside.md"}]}`
+	if err := os.WriteFile(filepath.Join(sourceDir, journalExportManifestName), []byte(manifest), 0o644); err != nil {
+		t.Fatalf("write manifest: %v", err)
+	}
+	if _, err := service.ImportMarkdownDirectory(sourceDir); err == nil {
+		t.Fatal("expected import to reject a manifest path outside the selected folder")
+	}
+}
+
+func TestImportAllowsAssetInsideSelectedFolder(t *testing.T) {
+	service := newTestService(t)
+	sourceDir := t.TempDir()
+	assetDir := filepath.Join(sourceDir, "Note.assets")
+	if err := os.MkdirAll(assetDir, 0o755); err != nil {
+		t.Fatalf("create asset directory: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(assetDir, "image.png"), []byte{0x89, 0x50, 0x4e, 0x47}, 0o644); err != nil {
+		t.Fatalf("write image: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(sourceDir, "Note.md"), []byte("![Example](Note.assets/image.png)\n"), 0o644); err != nil {
+		t.Fatalf("write markdown: %v", err)
+	}
+
+	response, err := service.ImportMarkdownDirectory(sourceDir)
+	if err != nil {
+		t.Fatalf("import markdown with local asset: %v", err)
+	}
+	journal := findTreeItem(response.Tree.Items, response.Item.ID)
+	if journal == nil || len(journal.Children) != 1 {
+		t.Fatalf("expected imported document, got %#v", journal)
+	}
+	content, err := service.OpenDocument(journal.Children[0].ID)
+	if err != nil {
+		t.Fatalf("open imported document: %v", err)
+	}
+	if len(attachmentIDsFromContent(content.Content)) != 1 {
+		t.Fatalf("expected imported asset reference, got %#v", content.Content)
+	}
+}
+
+func TestMigrationRecordsVersionAndFailsCleanlyForInvalidSchema(t *testing.T) {
+	service := newTestService(t)
+	var version int
+	if err := service.db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil {
+		t.Fatalf("read schema version: %v", err)
+	}
+	if version != 1 {
+		t.Fatalf("expected schema version 1, got %d", version)
+	}
+
+	path := filepath.Join(t.TempDir(), "invalid.db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("open invalid db: %v", err)
+	}
+	if _, err := db.Exec(`CREATE TABLE items (id TEXT PRIMARY KEY)`); err != nil {
+		t.Fatalf("create invalid schema: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close invalid db: %v", err)
+	}
+	if _, err := OpenJournalService(path); err == nil {
+		t.Fatal("expected invalid schema migration to return an error")
+	}
+}
+
+func TestLargeLibraryTreeBuildsWithStableCounts(t *testing.T) {
+	service := newTestService(t)
+	tree, err := service.GetLibraryTree()
+	if err != nil {
+		t.Fatalf("get tree: %v", err)
+	}
+	journalID := tree.Items[0].ID
+	now := nowString()
+	tx, err := service.db.Begin()
+	if err != nil {
+		t.Fatalf("begin large library insert: %v", err)
+	}
+	for i := 0; i < 1000; i++ {
+		id := fmt.Sprintf("large-folder-%04d", i)
+		if _, err := tx.Exec(
+			`INSERT INTO items (id, parent_id, kind, title, sort_order, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+			id, journalID, KindFolder, fmt.Sprintf("Folder %04d", i), i, now, now,
+		); err != nil {
+			_ = tx.Rollback()
+			t.Fatalf("insert large folder %d: %v", i, err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit large library insert: %v", err)
+	}
+
+	tree, err = service.GetLibraryTree()
+	if err != nil {
+		t.Fatalf("build large tree: %v", err)
+	}
+	journal := findTreeItem(tree.Items, journalID)
+	if journal == nil || journal.ItemCount != 1000 || len(journal.Children) != 1000 {
+		t.Fatalf("expected 1000 folders in large tree, got %#v", journal)
 	}
 }
 

@@ -39,6 +39,7 @@ import {
   X,
 } from 'lucide-react'
 import {editorExtensions} from './editor/extensions'
+import {OperationCoordinator} from './operations'
 import {
   api,
   messageFromError,
@@ -119,6 +120,7 @@ function App() {
   })
   const [libraryWidth, setLibraryWidth] = useState(libraryWidthDefault)
   const autosaveTimer = useRef<number | undefined>(undefined)
+  const operationCoordinator = useRef(new OperationCoordinator())
   const selectedJournalIdRef = useRef('')
   const latestDraft = useRef<{id: string, content: ProseMirrorDoc, version: number} | null>(null)
   const sentDraftVersion = useRef(0)
@@ -142,9 +144,18 @@ function App() {
   }, [])
 
   const loadTree = useCallback(async () => {
+    const requestVersion = operationCoordinator.current.nextTreeRequest()
     const response = await api.GetLibraryTree()
-    applyTree(response.items, response.trashId)
+    if (operationCoordinator.current.isCurrentTreeRequest(requestVersion)) applyTree(response.items, response.trashId)
   }, [applyTree])
+
+  function beginOperation(key: string) {
+    return operationCoordinator.current.begin(key)
+  }
+
+  function endOperation(key: string) {
+    operationCoordinator.current.end(key)
+  }
 
   useEffect(() => {
     activeDocId.current = activeDoc?.id ?? ''
@@ -173,11 +184,12 @@ function App() {
 
   useEffect(() => {
     let live = true
+    const requestVersion = operationCoordinator.current.nextTreeRequest()
     async function boot() {
       try {
         const [treeResponse, settings, info, encryption] = await Promise.all([api.GetLibraryTree(), api.GetAppSettings(), api.GetAppInfo(), api.GetEncryptionStatus()])
         if (!live) return
-        applyTree(treeResponse.items, treeResponse.trashId)
+        if (operationCoordinator.current.isCurrentTreeRequest(requestVersion)) applyTree(treeResponse.items, treeResponse.trashId)
         setAutosaveInterval(settings.autosaveIntervalMs)
         setLibraryWidth(clampNumber(settings.libraryWidth || libraryWidthDefault, libraryWidthMin, libraryWidthMax))
         setAppInfo(info)
@@ -204,14 +216,22 @@ function App() {
   }, [applyTree])
 
   useEffect(() => {
+    const requestVersion = operationCoordinator.current.nextTreeRequest()
     if (!searchQuery.trim()) {
       setSearchResults(new Set())
-      void loadTree()
+      void api.GetLibraryTree()
+        .then((response) => {
+          if (operationCoordinator.current.isCurrentTreeRequest(requestVersion)) applyTree(response.items, response.trashId)
+        })
+        .catch((error) => {
+          if (operationCoordinator.current.isCurrentTreeRequest(requestVersion)) setLastError(messageFromError(error))
+        })
       return
     }
     const handle = window.setTimeout(async () => {
       try {
         const response = await api.SearchLibrary(searchQuery)
+        if (!operationCoordinator.current.isCurrentTreeRequest(requestVersion)) return
         applyTree(response.items, response.trashId)
         setSearchResults(new Set(response.resultIds))
         setExpanded(expandAllContainers(response.items))
@@ -223,17 +243,20 @@ function App() {
   }, [applyTree, loadTree, searchQuery])
 
   async function refreshVisibleTree(fallbackItems?: TreeItem[], fallbackTrashId?: string) {
+    const requestVersion = operationCoordinator.current.nextTreeRequest()
     const query = searchQuery.trim()
     if (!query) {
       if (fallbackItems && fallbackTrashId) {
-        applyTree(fallbackItems, fallbackTrashId)
+        if (operationCoordinator.current.isCurrentTreeRequest(requestVersion)) applyTree(fallbackItems, fallbackTrashId)
       } else {
-        await loadTree()
+        const response = await api.GetLibraryTree()
+        if (operationCoordinator.current.isCurrentTreeRequest(requestVersion)) applyTree(response.items, response.trashId)
       }
       return
     }
 
     const response = await api.SearchLibrary(query)
+    if (!operationCoordinator.current.isCurrentTreeRequest(requestVersion)) return
     applyTree(response.items, response.trashId)
     setSearchResults(new Set(response.resultIds))
     setExpanded(expandAllContainers(response.items))
@@ -348,10 +371,13 @@ function App() {
 
   async function openDocument(id: string) {
     if (activeDoc?.id === id) return
+    const requestVersion = operationCoordinator.current.nextDocumentRequest()
     if (!(await flushActive())) return
+    if (!operationCoordinator.current.isCurrentDocumentRequest(requestVersion)) return
     try {
       setTitleFocusDocumentId('')
       const response = await api.OpenDocument(id)
+      if (!operationCoordinator.current.isCurrentDocumentRequest(requestVersion)) return
       showDocument(response, 'Opened')
     } catch (error) {
       setLastError(messageFromError(error))
@@ -365,6 +391,7 @@ function App() {
     setActiveDoc(response)
     setSelectedItemId(response.id)
     if (!hasSearch) {
+      operationCoordinator.current.invalidateTreeRequests()
       applyTree(response.tree.items, response.tree.trashId)
     }
     setSaveState('saved')
@@ -499,6 +526,8 @@ function App() {
     if (!deleteTarget) return
     const {item, inTrash} = deleteTarget
     const id = item.id
+    const operationKey = `delete:${id}`
+    if (!beginOperation(operationKey)) return
     setDeleteTarget(null)
     try {
       if (activeDoc && (activeDoc.id === id || isDescendantOf(flattened, activeDoc.id, id))) {
@@ -506,7 +535,7 @@ function App() {
       }
       const response = item.kind === 'journal'
         ? await api.DeleteJournal(id)
-        : inTrash ? await api.PermanentlyDeleteItem(id) : await api.MoveItemToTrash(id)
+        : await api.TrashItem({id, expectedInTrash: inTrash})
       await refreshVisibleTree(response.items, response.trashId)
       if (activeDoc && (activeDoc.id === id || isDescendantOf(flattened, activeDoc.id, id))) {
         setActiveDoc(null)
@@ -516,11 +545,15 @@ function App() {
       setStatus(item.kind === 'journal' || inTrash ? 'Deleted permanently' : 'Moved to Trash')
     } catch (error) {
       setLastError(messageFromError(error))
+    } finally {
+      endOperation(operationKey)
     }
   }
 
   async function moveItem(id: string, parentId: string, sortOrder = -1) {
     if (id === parentId) return
+    const operationKey = `move:${id}`
+    if (!beginOperation(operationKey)) return
     const item = flattened.find((entry) => entry.id === id)
     const sourceJournalId = journalIdFor(flattened, id)
     const targetJournalId = parentId ? journalIdFor(flattened, parentId) : ''
@@ -535,6 +568,8 @@ function App() {
       setStatus(parentId === trashId ? 'Moved to Trash' : item?.kind === 'journal' ? 'Reordered journal' : copied ? 'Copied' : 'Moved')
     } catch (error) {
       setLastError(messageFromError(error))
+    } finally {
+      endOperation(operationKey)
     }
   }
 

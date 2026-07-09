@@ -47,6 +47,7 @@ var appVersion = ""
 type App struct {
 	ctx               context.Context
 	service           *JournalService
+	commands          *Commands
 	selectedJournalID string
 	exportJournalItem *menu.MenuItem
 	importJournalItem *menu.MenuItem
@@ -71,6 +72,7 @@ func (a *App) startup(ctx context.Context) {
 		panic(err)
 	}
 	a.service = service
+	a.commands = NewCommands(service)
 	a.service.StartAutosave(ctx)
 }
 
@@ -82,55 +84,51 @@ func (a *App) shutdown(ctx context.Context) {
 }
 
 func (a *App) GetLibraryTree() (TreeResponse, error) {
-	return a.service.GetLibraryTree()
+	return a.commands.library.GetTree()
 }
 
 func (a *App) CreateDocument(parentID string) (DocumentResponse, error) {
-	return a.service.CreateDocument(parentID)
+	return a.commands.documents.Create(parentID)
 }
 
 func (a *App) DuplicateDocument(id string) (DocumentResponse, error) {
-	return a.service.DuplicateDocument(id)
+	return a.commands.documents.Duplicate(id)
 }
 
 func (a *App) CreateFolder(parentID string, title string) (ItemResponse, error) {
-	return a.service.CreateFolder(parentID, title)
+	return a.commands.library.CreateFolder(parentID, title)
 }
 
 func (a *App) CreateJournal(title string) (ItemResponse, error) {
-	return a.service.CreateJournal(title)
+	return a.commands.library.CreateJournal(title)
 }
 
 func (a *App) RenameItem(id string, title string) (ItemResponse, error) {
-	return a.service.RenameItem(id, title)
+	return a.commands.library.RenameItem(id, title)
 }
 
 func (a *App) MoveItem(id string, newParentID string, newSortOrder int) (TreeResponse, error) {
-	return a.service.MoveItem(id, newParentID, newSortOrder)
+	return a.commands.library.MoveItem(id, newParentID, newSortOrder)
 }
 
-func (a *App) MoveItemToTrash(id string) (TreeResponse, error) {
-	return a.service.MoveItemToTrash(id)
-}
-
-func (a *App) PermanentlyDeleteItem(id string) (TreeResponse, error) {
-	return a.service.PermanentlyDeleteItem(id)
+func (a *App) TrashItem(command TrashItemCommand) (TreeResponse, error) {
+	return a.commands.library.TrashItem(command)
 }
 
 func (a *App) DeleteJournal(id string) (TreeResponse, error) {
-	return a.service.DeleteJournal(id)
+	return a.commands.library.DeleteJournal(id)
 }
 
 func (a *App) OpenDocument(id string) (DocumentResponse, error) {
-	return a.service.OpenDocument(id)
+	return a.commands.documents.Open(id)
 }
 
 func (a *App) UpdateDocumentDraft(id string, content map[string]any, version int64) (DocumentDraftResponse, error) {
-	return a.service.UpdateDocumentDraft(id, content, version)
+	return a.commands.documents.UpdateDraft(id, content, version)
 }
 
 func (a *App) CreateDocumentAttachment(documentID string, name string, mimeType string, dataBase64 string) (DocumentAttachmentResponse, error) {
-	return a.service.CreateDocumentAttachment(documentID, name, mimeType, dataBase64)
+	return a.commands.documents.CreateAttachment(documentID, name, mimeType, dataBase64)
 }
 
 func (a *App) PickDocumentImage(documentID string) (DocumentAttachmentResponse, error) {
@@ -150,61 +148,61 @@ func (a *App) PickDocumentImage(documentID string) (DocumentAttachmentResponse, 
 	if strings.TrimSpace(path) == "" {
 		return DocumentAttachmentResponse{}, nil
 	}
-	return a.service.CreateDocumentAttachmentFromPath(documentID, path)
+	return a.commands.documents.CreateAttachmentFromPath(documentID, path)
 }
 
 func (a *App) GetDocumentAttachmentDataURL(attachmentID string) (DocumentAttachmentDataResponse, error) {
-	return a.service.GetDocumentAttachmentDataURL(attachmentID)
+	return a.commands.documents.AttachmentDataURL(attachmentID)
 }
 
 func (a *App) UpdateDocumentSpacing(id string, spacingPreset string) (DocumentSaveResponse, error) {
-	return a.service.UpdateDocumentSpacing(id, spacingPreset)
+	return a.commands.documents.UpdateSpacing(id, spacingPreset)
 }
 
 func (a *App) FlushDocument(id string) (DocumentSaveResponse, error) {
-	return a.service.FlushDocument(id)
+	return a.commands.documents.Flush(id)
 }
 
 func (a *App) SearchLibrary(query string) (SearchResponse, error) {
-	return a.service.SearchLibrary(query)
+	return a.commands.library.Search(query)
 }
 
 func (a *App) GetEncryptionStatus() (EncryptionStatusResponse, error) {
-	return a.service.GetEncryptionStatus()
+	return a.commands.encryption.Status()
 }
 
 func (a *App) CreateMasterPassword(password string) error {
-	return a.service.CreateMasterPassword(password)
+	return a.commands.encryption.CreateMasterPassword(password)
 }
 
 func (a *App) UnlockEncryption(password string) (EncryptionStatusResponse, error) {
-	if err := a.service.UnlockEncryption(password); err != nil {
+	if err := a.commands.encryption.Unlock(password); err != nil {
 		return EncryptionStatusResponse{}, err
 	}
-	return a.service.GetEncryptionStatus()
+	return a.commands.encryption.Status()
 }
 
 func (a *App) ChangeMasterPassword(currentPassword string, newPassword string) (EncryptionStatusResponse, error) {
-	if err := a.service.ChangeMasterPassword(currentPassword, newPassword); err != nil {
+	if err := a.commands.encryption.ChangeMasterPassword(currentPassword, newPassword); err != nil {
 		return EncryptionStatusResponse{}, err
 	}
-	return a.service.GetEncryptionStatus()
+	return a.commands.encryption.Status()
 }
 
 func (a *App) EncryptJournal(journalID string) (TreeResponse, error) {
-	return a.service.EncryptJournal(journalID)
+	return a.commands.encryption.EncryptJournal(journalID)
 }
 
 func (a *App) DecryptJournal(journalID string) (TreeResponse, error) {
-	return a.service.DecryptJournal(journalID)
+	return a.commands.encryption.DecryptJournal(journalID)
 }
 
 func (a *App) GetAppSettings() (AppSettingsResponse, error) {
-	return a.service.GetAppSettings()
+	return a.commands.settings.Get()
 }
 
 func (a *App) UpdateAppSettings(settings AppSettingsPatch) (AppSettingsResponse, error) {
-	return a.service.UpdateAppSettings(settings)
+	return a.commands.settings.Update(settings)
 }
 
 func (a *App) GetAppInfo() AppInfo {
@@ -297,91 +295,6 @@ func appInfo() AppInfo {
 	return info
 }
 
-type TreeItem struct {
-	ID               string     `json:"id"`
-	ParentID         string     `json:"parentId"`
-	Kind             string     `json:"kind"`
-	Title            string     `json:"title"`
-	SortOrder        int        `json:"sortOrder"`
-	SystemKey        string     `json:"systemKey"`
-	CreatedAt        string     `json:"createdAt"`
-	UpdatedAt        string     `json:"updatedAt"`
-	EncryptionState  string     `json:"encryptionState"`
-	EncryptionKeyID  string     `json:"encryptionKeyId"`
-	EncryptionLocked bool       `json:"encryptionLocked"`
-	DocumentCount    int        `json:"documentCount"`
-	ItemCount        int        `json:"itemCount"`
-	Children         []TreeItem `json:"children"`
-}
-
-type TreeResponse struct {
-	Items   []TreeItem `json:"items"`
-	TrashID string     `json:"trashId"`
-}
-
-type ItemResponse struct {
-	Item TreeItem     `json:"item"`
-	Tree TreeResponse `json:"tree"`
-}
-
-type DocumentResponse struct {
-	ID            string         `json:"id"`
-	Title         string         `json:"title"`
-	Content       map[string]any `json:"content"`
-	SpacingPreset string         `json:"spacingPreset"`
-	SchemaVersion int            `json:"schemaVersion"`
-	CreatedAt     string         `json:"createdAt"`
-	UpdatedAt     string         `json:"updatedAt"`
-	Item          TreeItem       `json:"item"`
-	Tree          TreeResponse   `json:"tree"`
-	SaveState     string         `json:"saveState"`
-}
-
-type DocumentDraftResponse struct {
-	ID        string `json:"id"`
-	SaveState string `json:"saveState"`
-	Version   int64  `json:"version"`
-}
-
-type DocumentSaveResponse struct {
-	ID        string `json:"id"`
-	SaveState string `json:"saveState"`
-	SavedAt   string `json:"savedAt"`
-	UpdatedAt string `json:"updatedAt"`
-	Version   int64  `json:"version"`
-}
-
-type DocumentAttachmentResponse struct {
-	ID           string `json:"id"`
-	DocumentID   string `json:"documentId"`
-	MimeType     string `json:"mimeType"`
-	OriginalName string `json:"originalName"`
-	SizeBytes    int    `json:"sizeBytes"`
-}
-
-type DocumentAttachmentDataResponse struct {
-	ID      string `json:"id"`
-	DataURL string `json:"dataUrl"`
-}
-
-type SearchResponse struct {
-	Query     string     `json:"query"`
-	Items     []TreeItem `json:"items"`
-	ResultIDs []string   `json:"resultIds"`
-	TrashID   string     `json:"trashId"`
-}
-
-type AppSettingsResponse struct {
-	AutosaveIntervalMS int    `json:"autosaveIntervalMs"`
-	LastDocumentID     string `json:"lastDocumentId"`
-	LibraryWidth       int    `json:"libraryWidth"`
-}
-
-type AppSettingsPatch struct {
-	AutosaveIntervalMS int `json:"autosaveIntervalMs"`
-	LibraryWidth       int `json:"libraryWidth"`
-}
-
 type rowItem struct {
 	ID               string
 	ParentID         sql.NullString
@@ -404,8 +317,10 @@ type pendingDraft struct {
 }
 
 type JournalService struct {
+	repository       *SQLiteRepository
 	db               *sql.DB
 	mu               sync.Mutex
+	operationMu      sync.Mutex
 	cryptoMu         sync.Mutex
 	pending          map[string]pendingDraft
 	lastDraftVersion map[string]int64
@@ -414,33 +329,30 @@ type JournalService struct {
 }
 
 func OpenJournalService(path string) (*JournalService, error) {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return nil, err
-	}
-	db, err := sql.Open("sqlite", path)
+	repository, err := OpenSQLiteRepository(path)
 	if err != nil {
 		return nil, err
 	}
-	db.SetMaxOpenConns(1)
 
 	service := &JournalService{
-		db:               db,
+		repository:       repository,
+		db:               repository.db,
 		pending:          map[string]pendingDraft{},
 		lastDraftVersion: map[string]int64{},
 		journalKeys:      map[string][]byte{},
 	}
 	if err := service.migrate(); err != nil {
-		_ = db.Close()
+		_ = repository.Close()
 		return nil, err
 	}
 	return service, nil
 }
 
 func (s *JournalService) Close() error {
-	return s.db.Close()
+	return s.repository.Close()
 }
 
-func (s *JournalService) migrate() error {
+func (s *JournalService) migrateV1() error {
 	if _, err := s.db.Exec(`PRAGMA foreign_keys = ON`); err != nil {
 		return err
 	}
@@ -1230,7 +1142,16 @@ func (s *JournalService) MoveItem(id string, newParentID string, newSortOrder in
 	return s.GetLibraryTree()
 }
 
-func (s *JournalService) MoveItemToTrash(id string) (TreeResponse, error) {
+// TrashItem performs one explicit destructive transition. It rejects a stale
+// client view instead of inferring a second transition from current state.
+func (s *JournalService) TrashItem(command TrashItemCommand) (TreeResponse, error) {
+	id := strings.TrimSpace(command.ID)
+	if id == "" {
+		return TreeResponse{}, fmt.Errorf("item id is required")
+	}
+	s.operationMu.Lock()
+	defer s.operationMu.Unlock()
+
 	trashID, err := s.trashID()
 	if err != nil {
 		return TreeResponse{}, err
@@ -1243,9 +1164,21 @@ func (s *JournalService) MoveItemToTrash(id string) (TreeResponse, error) {
 		return TreeResponse{}, err
 	}
 	if inTrash {
+		if !command.ExpectedInTrash {
+			return TreeResponse{}, fmt.Errorf("item is already in trash; confirm permanent deletion explicitly")
+		}
 		return s.PermanentlyDeleteItem(id)
 	}
+	if command.ExpectedInTrash {
+		return TreeResponse{}, fmt.Errorf("item is no longer in trash")
+	}
 	return s.MoveItem(id, trashID, -1)
+}
+
+// MoveItemToTrash is retained for internal callers during the transition to
+// command-based APIs. It intentionally never performs permanent deletion.
+func (s *JournalService) MoveItemToTrash(id string) (TreeResponse, error) {
+	return s.TrashItem(TrashItemCommand{ID: id, ExpectedInTrash: false})
 }
 
 func (s *JournalService) PermanentlyDeleteItem(id string) (TreeResponse, error) {

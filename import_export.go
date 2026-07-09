@@ -20,6 +20,9 @@ import (
 const (
 	journalExportManifestName    = ".journal-export.json"
 	journalExportManifestVersion = 1
+	maxImportNodeCount           = 100000
+	maxImportDepth               = 128
+	maxMarkdownImportBytes       = 20 * 1024 * 1024
 )
 
 var (
@@ -101,7 +104,7 @@ func (a *App) ExportJournalDirectory(journalID string) error {
 	if strings.TrimSpace(targetDir) == "" {
 		return nil
 	}
-	return a.service.ExportJournalToDirectory(journalID, targetDir)
+	return a.commands.library.ExportJournal(journalID, targetDir)
 }
 
 func (a *App) ImportMarkdownDirectory() (ItemResponse, error) {
@@ -117,7 +120,7 @@ func (a *App) ImportMarkdownDirectory() (ItemResponse, error) {
 	if strings.TrimSpace(sourceDir) == "" {
 		return ItemResponse{}, nil
 	}
-	return a.service.ImportMarkdownDirectory(sourceDir)
+	return a.commands.library.ImportMarkdownDirectory(sourceDir)
 }
 
 func (s *JournalService) ExportJournalToDirectory(journalID string, targetDir string) error {
@@ -377,6 +380,13 @@ func (s *JournalService) importMarkdownTree(sourceDir string) (ItemResponse, err
 }
 
 func (s *JournalService) importJournalWithNodes(title string, createdAt string, updatedAt string, nodes []JournalExportManifestNode, sourceDir string, useManifest bool) (ItemResponse, error) {
+	rootDir, err := importRoot(sourceDir)
+	if err != nil {
+		return ItemResponse{}, err
+	}
+	if err := validateImportNodes(rootDir, nodes); err != nil {
+		return ItemResponse{}, err
+	}
 	tx, err := s.db.Begin()
 	if err != nil {
 		return ItemResponse{}, err
@@ -388,7 +398,7 @@ func (s *JournalService) importJournalWithNodes(title string, createdAt string, 
 		return ItemResponse{}, err
 	}
 	for _, node := range nodes {
-		if err := s.importNodeTx(tx, sourceDir, journalID, node, useManifest); err != nil {
+		if err := s.importNodeTx(tx, rootDir, journalID, node, useManifest); err != nil {
 			return ItemResponse{}, err
 		}
 	}
@@ -420,7 +430,10 @@ func (s *JournalService) importNodeTx(tx *sql.Tx, sourceDir string, parentID str
 		}
 		return nil
 	case KindDocument:
-		docPath := filepath.Join(sourceDir, filepath.FromSlash(node.File))
+		docPath, err := resolveImportPath(sourceDir, node.File)
+		if err != nil {
+			return err
+		}
 		parsed, err := parseMarkdownFile(docPath)
 		if err != nil {
 			return err
@@ -441,7 +454,10 @@ func (s *JournalService) importNodeTx(tx *sql.Tx, sourceDir string, parentID str
 		}
 		idMap := map[string]string{}
 		for _, attachment := range attachments {
-			attachmentPath := importAssetPath(sourceDir, attachment.File)
+			attachmentPath, err := resolveImportedAssetPath(sourceDir, attachment.File)
+			if err != nil {
+				return err
+			}
 			data, err := os.ReadFile(attachmentPath)
 			if err != nil {
 				return err
@@ -602,6 +618,9 @@ func buildMarkdownImportNodes(rootDir string, currentDir string) ([]JournalExpor
 }
 
 func buildMarkdownImportNode(rootDir string, fullPath string, entry os.DirEntry, sortOrder int) (JournalExportManifestNode, bool, error) {
+	if entry.Type()&os.ModeSymlink != 0 {
+		return JournalExportManifestNode{}, false, nil
+	}
 	info, err := entry.Info()
 	if err != nil {
 		return JournalExportManifestNode{}, false, err
@@ -1599,12 +1618,99 @@ func mimeExtension(mimeType string) string {
 	}
 }
 
-func importAssetPath(sourceDir string, file string) string {
-	path := filepath.FromSlash(strings.TrimSpace(file))
-	if filepath.IsAbs(path) {
-		return path
+func importRoot(sourceDir string) (string, error) {
+	root, err := filepath.EvalSymlinks(strings.TrimSpace(sourceDir))
+	if err != nil {
+		return "", err
 	}
-	return filepath.Join(sourceDir, path)
+	info, err := os.Stat(root)
+	if err != nil {
+		return "", err
+	}
+	if !info.IsDir() {
+		return "", fmt.Errorf("source must be a directory")
+	}
+	return root, nil
+}
+
+func resolveImportPath(rootDir string, file string) (string, error) {
+	path := filepath.FromSlash(strings.TrimSpace(file))
+	if path == "" || filepath.IsAbs(path) {
+		return "", fmt.Errorf("import path must be a non-empty relative path")
+	}
+	return resolvePathWithinImportRoot(rootDir, path)
+}
+
+// Markdown parsing records asset paths relative to the Markdown document, so
+// they are already joined to that document's directory. Absolute paths are
+// accepted only here and must still resolve beneath the selected import root.
+func resolveImportedAssetPath(rootDir string, file string) (string, error) {
+	path := filepath.FromSlash(strings.TrimSpace(file))
+	if path == "" {
+		return "", fmt.Errorf("import asset path is required")
+	}
+	return resolvePathWithinImportRoot(rootDir, path)
+}
+
+func resolvePathWithinImportRoot(rootDir string, path string) (string, error) {
+	candidate := path
+	if !filepath.IsAbs(candidate) {
+		candidate = filepath.Join(rootDir, candidate)
+	}
+	resolved, err := filepath.EvalSymlinks(candidate)
+	if err != nil {
+		return "", err
+	}
+	relative, err := filepath.Rel(rootDir, resolved)
+	if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("import path escapes the selected folder")
+	}
+	info, err := os.Stat(resolved)
+	if err != nil {
+		return "", err
+	}
+	if !info.Mode().IsRegular() {
+		return "", fmt.Errorf("import path must reference a regular file")
+	}
+	return resolved, nil
+}
+
+func validateImportNodes(rootDir string, nodes []JournalExportManifestNode) error {
+	count := 0
+	var validate func([]JournalExportManifestNode, int) error
+	validate = func(current []JournalExportManifestNode, depth int) error {
+		if depth > maxImportDepth {
+			return fmt.Errorf("import hierarchy exceeds the maximum depth of %d", maxImportDepth)
+		}
+		for _, node := range current {
+			count++
+			if count > maxImportNodeCount {
+				return fmt.Errorf("import contains more than %d items", maxImportNodeCount)
+			}
+			switch node.Kind {
+			case KindFolder:
+				if err := validate(node.Children, depth+1); err != nil {
+					return err
+				}
+			case KindDocument:
+				path, err := resolveImportPath(rootDir, node.File)
+				if err != nil {
+					return err
+				}
+				info, err := os.Stat(path)
+				if err != nil {
+					return err
+				}
+				if info.Size() > maxMarkdownImportBytes {
+					return fmt.Errorf("markdown file %q exceeds the 20 MB limit", path)
+				}
+			default:
+				return fmt.Errorf("unsupported import item kind %q", node.Kind)
+			}
+		}
+		return nil
+	}
+	return validate(nodes, 1)
 }
 
 func normalizeLinkURL(value string) string {

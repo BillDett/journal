@@ -77,6 +77,11 @@ export type AppSettingsPatch = {
   libraryWidth: number
 }
 
+export type TrashItemCommand = {
+  id: string
+  expectedInTrash: boolean
+}
+
 export type AppInfo = {
   name: string
   version: string
@@ -98,8 +103,7 @@ type BackendAPI = {
   CreateJournal: (title: string) => Promise<ItemResponse>
   RenameItem: (id: string, title: string) => Promise<ItemResponse>
   MoveItem: (id: string, newParentId: string, newSortOrder: number) => Promise<TreeResponse>
-  MoveItemToTrash: (id: string) => Promise<TreeResponse>
-  PermanentlyDeleteItem: (id: string) => Promise<TreeResponse>
+  TrashItem: (command: TrashItemCommand) => Promise<TreeResponse>
   DeleteJournal: (id: string) => Promise<TreeResponse>
   OpenDocument: (id: string) => Promise<DocumentResponse>
   UpdateDocumentDraft: (id: string, content: ProseMirrorDoc, version: number) => Promise<{id: string, saveState: string, version: number}>
@@ -151,8 +155,7 @@ function missingBackend(): BackendAPI {
     CreateJournal: fail,
     RenameItem: fail,
     MoveItem: fail,
-    MoveItemToTrash: fail,
-    PermanentlyDeleteItem: fail,
+    TrashItem: fail,
     DeleteJournal: fail,
     OpenDocument: fail,
     UpdateDocumentDraft: fail,
