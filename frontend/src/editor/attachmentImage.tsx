@@ -5,10 +5,15 @@ import {api, messageFromError} from '../wails/libraryApi'
 
 const minImageWidthPercent = 15
 const maxImageWidthPercent = 100
+type ImageTextAlign = 'left' | 'center' | 'right'
 
 function clampImageWidthPercent(value: unknown) {
   if (typeof value !== 'number' || !Number.isFinite(value)) return null
   return Math.min(maxImageWidthPercent, Math.max(minImageWidthPercent, value))
+}
+
+function imageTextAlign(value: unknown): ImageTextAlign {
+  return value === 'center' || value === 'right' ? value : 'left'
 }
 
 function AttachmentImageView({node, selected, updateAttributes}: NodeViewProps) {
@@ -19,7 +24,15 @@ function AttachmentImageView({node, selected, updateAttributes}: NodeViewProps) 
   const [error, setError] = useState('')
   const [previewWidthPercent, setPreviewWidthPercent] = useState<number | null>(null)
   const widthPercent = previewWidthPercent ?? clampImageWidthPercent(node.attrs.widthPercent)
-  const imageStyle = widthPercent === null ? undefined : {width: `${widthPercent}%`}
+  const textAlign = imageTextAlign(node.attrs.textAlign)
+  const imageStyle = {
+    ...(widthPercent === null ? {} : {width: `${widthPercent}%`}),
+    ...(textAlign === 'center'
+      ? {marginLeft: 'auto', marginRight: 'auto'}
+      : textAlign === 'right'
+        ? {marginLeft: 'auto', marginRight: 0}
+        : {marginLeft: 0, marginRight: 'auto'}),
+  }
 
   useEffect(() => {
     let active = true
@@ -106,6 +119,7 @@ function AttachmentImageView({node, selected, updateAttributes}: NodeViewProps) 
       className={selected ? 'attachment-image selected' : 'attachment-image'}
       style={imageStyle}
       data-image-width-percent={widthPercent ?? undefined}
+      data-text-align={textAlign}
     >
       <div className="attachment-image-frame">
         {src ? <img src={src} alt={alt} draggable={false}/> : <div className="attachment-image-placeholder">{error || 'Loading image...'}</div>}

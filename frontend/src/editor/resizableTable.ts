@@ -77,8 +77,12 @@ function applyTableWidths(view: EditorView) {
     if (!(wrapper instanceof HTMLElement)) return false
 
     const widthPercent = typeof node.attrs.widthPercent === 'number' ? clampTableWidth(node.attrs.widthPercent) : null
+    const textAlign = node.attrs.textAlign === 'center' || node.attrs.textAlign === 'right' ? node.attrs.textAlign : 'left'
     wrapper.style.maxWidth = '100%'
     wrapper.style.width = widthPercent === null ? '' : `${widthPercent}%`
+    wrapper.style.marginLeft = textAlign === 'center' || textAlign === 'right' ? 'auto' : ''
+    wrapper.style.marginRight = textAlign === 'center' ? 'auto' : ''
+    wrapper.dataset.textAlign = textAlign
     if (widthPercent === null) {
       delete wrapper.dataset.tableWidthPercent
     } else {

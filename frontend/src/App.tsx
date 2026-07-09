@@ -2,6 +2,9 @@ import {useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, t
 import {EditorContent, useEditor} from '@tiptap/react'
 import type {Editor} from '@tiptap/react'
 import {
+  AlignCenter,
+  AlignLeft,
+  AlignRight,
   Bold,
   BookOpenText,
   BookPlus,
@@ -52,6 +55,7 @@ import {BrowserOpenURL, EventsOn} from '../wailsjs/runtime/runtime'
 type SaveState = 'idle' | 'dirty' | 'saving' | 'saved' | 'error'
 type HeadingLevel = 1 | 2 | 3 | 4 | 5 | 6
 type ParagraphStyle = 'normal' | `heading-${HeadingLevel}`
+type HorizontalAlignment = 'left' | 'center' | 'right'
 
 const libraryWidthMin = 260
 const libraryWidthDefault = 340
@@ -951,6 +955,7 @@ function EditorPane({document, focusTitle = false, saveState, status, onDraft, o
   const [canCreateLink, setCanCreateLink] = useState(false)
   const [isTableActive, setIsTableActive] = useState(false)
   const [paragraphStyle, setParagraphStyle] = useState<ParagraphStyle>('normal')
+  const [horizontalAlignment, setHorizontalAlignment] = useState<HorizontalAlignment>('left')
   const titleInputRef = useRef<HTMLInputElement | null>(null)
   const imageInputRef = useRef<HTMLInputElement | null>(null)
   const editorRef = useRef<Editor | null>(null)
@@ -979,6 +984,7 @@ function EditorPane({document, focusTitle = false, saveState, status, onDraft, o
     setCanCreateLink(!editor.state.selection.empty)
     setIsTableActive(editor.isActive('table'))
     setParagraphStyle(activeParagraphStyle(editor))
+    setHorizontalAlignment(activeHorizontalAlignment(editor))
   }, [])
 
   const editor = useEditor({
@@ -1204,6 +1210,7 @@ function EditorPane({document, focusTitle = false, saveState, status, onDraft, o
             canCreateLink={canCreateLink}
             isTableActive={isTableActive}
             paragraphStyle={paragraphStyle}
+            horizontalAlignment={horizontalAlignment}
             spacingPreset={document.spacingPreset ?? 'compact'}
             onCreateLink={openCreateLinkPopover}
             onInsertImage={openImageFilePicker}
@@ -1396,11 +1403,25 @@ function activeParagraphStyle(editor: Editor): ParagraphStyle {
   return 'normal'
 }
 
+function activeHorizontalAlignment(editor: Editor): HorizontalAlignment {
+  for (const alignment of ['center', 'right'] as const) {
+    if (
+      editor.isActive({textAlign: alignment}) ||
+      editor.isActive('attachmentImage', {textAlign: alignment}) ||
+      editor.isActive('table', {textAlign: alignment})
+    ) {
+      return alignment
+    }
+  }
+  return 'left'
+}
+
 type EditorToolbarProps = {
   editor: Editor | null
   canCreateLink: boolean
   isTableActive: boolean
   paragraphStyle: ParagraphStyle
+  horizontalAlignment: HorizontalAlignment
   disabled?: boolean
   spacingPreset: SpacingPreset
   onCreateLink: () => void
@@ -1408,7 +1429,7 @@ type EditorToolbarProps = {
   onSpacingPresetChange: (spacingPreset: SpacingPreset) => void
 }
 
-function EditorToolbar({editor, canCreateLink, isTableActive, paragraphStyle, disabled = false, spacingPreset, onCreateLink, onInsertImage, onSpacingPresetChange}: EditorToolbarProps) {
+function EditorToolbar({editor, canCreateLink, isTableActive, paragraphStyle, horizontalAlignment, disabled = false, spacingPreset, onCreateLink, onInsertImage, onSpacingPresetChange}: EditorToolbarProps) {
   const blocked = disabled || !editor
   const linkBlocked = blocked || !canCreateLink
   const insertTable = () => {
@@ -1423,6 +1444,9 @@ function EditorToolbar({editor, canCreateLink, isTableActive, paragraphStyle, di
 
     const level = Number(style.replace('heading-', '')) as HeadingLevel
     editor.chain().focus().setHeading({level}).run()
+  }
+  const setHorizontalAlignment = (alignment: HorizontalAlignment) => {
+    editor?.chain().focus().setTextAlign(alignment).run()
   }
   return (
     <div className="format-toolbar" aria-label="Formatting">
@@ -1451,7 +1475,6 @@ function EditorToolbar({editor, canCreateLink, isTableActive, paragraphStyle, di
         <Tool disabled={linkBlocked} active={editor?.isActive('link')} label="Create link" onClick={onCreateLink}><Link2 size={16}/></Tool>
         <Tool disabled={blocked} label="Insert image" onClick={onInsertImage}><ImageIcon size={16}/></Tool>
         <label className="spacing-control" title="Paragraph spacing">
-          <span>Spacing</span>
           <select
             value={spacingPreset}
             disabled={blocked}
@@ -1462,6 +1485,9 @@ function EditorToolbar({editor, canCreateLink, isTableActive, paragraphStyle, di
             <option value="relaxed">Relaxed</option>
           </select>
         </label>
+        <Tool disabled={blocked} active={horizontalAlignment === 'left'} label="Align left" onClick={() => setHorizontalAlignment('left')}><AlignLeft size={16}/></Tool>
+        <Tool disabled={blocked} active={horizontalAlignment === 'center'} label="Align center" onClick={() => setHorizontalAlignment('center')}><AlignCenter size={16}/></Tool>
+        <Tool disabled={blocked} active={horizontalAlignment === 'right'} label="Align right" onClick={() => setHorizontalAlignment('right')}><AlignRight size={16}/></Tool>
         <span className="toolbar-divider"/>
         <Tool disabled={blocked} active={editor?.isActive('bulletList')} label="Bullet list" onClick={() => editor?.chain().focus().toggleBulletList().run()}><List size={16}/></Tool>
         <Tool disabled={blocked} active={editor?.isActive('orderedList')} label="Numbered list" onClick={() => editor?.chain().focus().toggleOrderedList().run()}><ListOrdered size={16}/></Tool>

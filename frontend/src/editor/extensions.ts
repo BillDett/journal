@@ -55,7 +55,7 @@ export const editorExtensions = [
   }),
   Typography,
   TextAlign.configure({
-    types: ['heading', 'paragraph'],
+    types: ['heading', 'paragraph', 'listItem', 'taskItem', 'attachmentImage', 'table'],
   }),
   CharacterCount,
 ]
