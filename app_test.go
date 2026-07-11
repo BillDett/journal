@@ -345,8 +345,8 @@ func TestMigrationRecordsVersionAndFailsCleanlyForInvalidSchema(t *testing.T) {
 	if err := service.db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil {
 		t.Fatalf("read schema version: %v", err)
 	}
-	if version != 2 {
-		t.Fatalf("expected schema version 2, got %d", version)
+	if version != 3 {
+		t.Fatalf("expected schema version 3, got %d", version)
 	}
 
 	path := filepath.Join(t.TempDir(), "invalid.db")

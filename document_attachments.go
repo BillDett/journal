@@ -86,14 +86,20 @@ func (s *JournalService) createDocumentAttachment(documentID string, name string
 		}
 		contentBlob = nil
 	}
+	storedBytes := contentBlob
+	if len(contentCiphertext) > 0 {
+		storedBytes = contentCiphertext
+	}
+	storedDigest := digestBytes(storedBytes)
+	storedSize := len(storedBytes)
 	name = strings.TrimSpace(filepath.Base(name))
 	if name == "." || name == string(filepath.Separator) {
 		name = ""
 	}
 	if _, err := s.db.Exec(
-		`INSERT INTO document_attachments (id, document_id, mime_type, original_name, size_bytes, content_blob, content_ciphertext, created_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-		id, documentID, mimeType, name, len(data), contentBlob, contentCiphertext, now,
+		`INSERT INTO document_attachments (id, document_id, mime_type, original_name, size_bytes, content_blob, content_ciphertext, stored_digest, stored_size, created_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		id, documentID, mimeType, name, len(data), contentBlob, contentCiphertext, storedDigest, storedSize, now,
 	); err != nil {
 		return DocumentAttachmentResponse{}, err
 	}
@@ -108,10 +114,12 @@ func (s *JournalService) GetDocumentAttachmentDataURL(attachmentID string) (Docu
 	var documentID, mimeType string
 	var contentBlob []byte
 	var contentCiphertext []byte
+	var storedDigest sql.NullString
+	var storedSize sql.NullInt64
 	if err := s.db.QueryRow(
-		`SELECT document_id, mime_type, content_blob, content_ciphertext FROM document_attachments WHERE id = ?`,
+		`SELECT document_id, mime_type, content_blob, content_ciphertext, stored_digest, stored_size FROM document_attachments WHERE id = ?`,
 		attachmentID,
-	).Scan(&documentID, &mimeType, &contentBlob, &contentCiphertext); err != nil {
+	).Scan(&documentID, &mimeType, &contentBlob, &contentCiphertext, &storedDigest, &storedSize); err != nil {
 		return DocumentAttachmentDataResponse{}, err
 	}
 	item, err := s.getRawRowItemFrom(s.db, documentID)
@@ -119,6 +127,20 @@ func (s *JournalService) GetDocumentAttachmentDataURL(attachmentID string) (Docu
 		return DocumentAttachmentDataResponse{}, err
 	}
 	data := contentBlob
+	if len(data) == 0 && len(contentCiphertext) == 0 && s.StoreKind() == StoreKindCloud {
+		if !storedDigest.Valid || !storedSize.Valid {
+			return DocumentAttachmentDataResponse{}, fmt.Errorf("attachment blob metadata is missing")
+		}
+		stored, err := s.readCachedBlob(storedDigest.String, storedSize.Int64)
+		if err != nil {
+			return DocumentAttachmentDataResponse{}, err
+		}
+		if item.EncryptionState == EncryptionEncrypted {
+			contentCiphertext = stored
+		} else {
+			data = stored
+		}
+	}
 	if item.EncryptionState == EncryptionEncrypted {
 		journalID, err := s.journalIDForItem(documentID)
 		if err != nil {

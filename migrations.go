@@ -13,6 +13,7 @@ type SchemaMigration struct {
 var schemaMigrations = []SchemaMigration{
 	{Version: 1, Name: "initial library, search, encryption, and attachments", Apply: (*JournalService).migrateV1},
 	{Version: 2, Name: "separate content and installation schema ownership", Apply: (*JournalService).migrateV2},
+	{Version: 3, Name: "portable cloud encryption and attachment descriptors", Apply: (*JournalService).migrateV3},
 }
 
 func (s *JournalService) migrate() error {

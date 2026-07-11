@@ -64,6 +64,10 @@ func (s *JournalService) migrateV2() error {
 	return nil
 }
 
+func (s *JournalService) migrateV3() error {
+	return applyContentSchema(s.db)
+}
+
 func (s *JournalService) ensureTrash() error {
 	var id string
 	err := s.db.QueryRow(`SELECT id FROM items WHERE system_key = ?`, SystemTrash).Scan(&id)
@@ -252,6 +256,9 @@ func (s *JournalService) ensureDefaultJournal() error {
 }
 
 func (s *JournalService) ensureSetting(key, value string) error {
+	if s.StoreKind() == StoreKindCloud {
+		return nil
+	}
 	now := nowString()
 	_, err := s.db.Exec(
 		`INSERT INTO app_settings (key, value, updated_at)
@@ -263,6 +270,9 @@ func (s *JournalService) ensureSetting(key, value string) error {
 }
 
 func (s *JournalService) settingValue(key string) string {
+	if s.StoreKind() == StoreKindCloud {
+		return ""
+	}
 	var value string
 	if err := s.db.QueryRow(`SELECT value FROM app_settings WHERE key = ?`, key).Scan(&value); err != nil {
 		return ""
@@ -271,6 +281,9 @@ func (s *JournalService) settingValue(key string) string {
 }
 
 func (s *JournalService) rememberLastDocument(id string) error {
+	if s.StoreKind() == StoreKindCloud {
+		return nil
+	}
 	now := nowString()
 	_, err := s.db.Exec(
 		`INSERT INTO app_settings (key, value, updated_at)

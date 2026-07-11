@@ -5,7 +5,7 @@ import (
 	"fmt"
 )
 
-const contentSchemaVersion = 1
+const contentSchemaVersion = 2
 const installationSchemaVersion = 1
 
 // contentSchemaStatements are the portable tables shared by the local library
@@ -75,6 +75,20 @@ func contentSchemaStatements() []string {
 		`CREATE TABLE IF NOT EXISTS content_schema_state (
 			id INTEGER PRIMARY KEY CHECK (id = 1),
 			version INTEGER NOT NULL
+		)`,
+		`CREATE TABLE IF NOT EXISTS cloud_portable_encryption (
+			cloud_journal_id TEXT PRIMARY KEY,
+			format_version INTEGER NOT NULL,
+			key_id TEXT NOT NULL,
+			kdf TEXT NOT NULL,
+			kdf_params_json TEXT NOT NULL,
+			salt BLOB NOT NULL,
+			wrapped_key_nonce BLOB NOT NULL,
+			wrapped_key_ciphertext BLOB NOT NULL,
+			verifier_nonce BLOB NOT NULL,
+			verifier_ciphertext BLOB NOT NULL,
+			created_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL
 		)`,
 	}
 }
@@ -159,7 +173,28 @@ func applyContentSchema(db *sql.DB) error {
 	if err := applySchemaStatements(db, contentSchemaStatements()); err != nil {
 		return err
 	}
+	if err := ensureContentPhase2Columns(db); err != nil {
+		return err
+	}
 	return ensureSchemaState(db, "content_schema_state", contentSchemaVersion)
+}
+
+func ensureContentPhase2Columns(db *sql.DB) error {
+	columns, err := tableColumns(db, "document_attachments")
+	if err != nil {
+		return err
+	}
+	for name, statement := range map[string]string{
+		"stored_digest": `ALTER TABLE document_attachments ADD COLUMN stored_digest TEXT NULL`,
+		"stored_size":   `ALTER TABLE document_attachments ADD COLUMN stored_size INTEGER NULL`,
+	} {
+		if !columns[name] {
+			if _, err := db.Exec(statement); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 func applyInstallationSchema(db *sql.DB) error {

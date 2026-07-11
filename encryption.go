@@ -83,6 +83,9 @@ func (s *JournalService) GetEncryptionStatus() (EncryptionStatusResponse, error)
 }
 
 func (s *JournalService) CreateMasterPassword(password string) error {
+	if s.StoreKind() == StoreKindCloud {
+		return ErrPortableEncryptionUnavailable
+	}
 	password = strings.TrimSpace(password)
 	if password == "" {
 		return fmt.Errorf("master password cannot be empty")
@@ -127,6 +130,9 @@ func (s *JournalService) CreateMasterPassword(password string) error {
 }
 
 func (s *JournalService) UnlockEncryption(password string) error {
+	if s.StoreKind() == StoreKindCloud {
+		return ErrPortableEncryptionUnavailable
+	}
 	key, err := s.verifyMasterPassword(password)
 	if err != nil {
 		return err
@@ -151,6 +157,9 @@ func (s *JournalService) UnlockEncryption(password string) error {
 }
 
 func (s *JournalService) ChangeMasterPassword(currentPassword string, newPassword string) error {
+	if s.StoreKind() == StoreKindCloud {
+		return ErrPortableEncryptionUnavailable
+	}
 	newPassword = strings.TrimSpace(newPassword)
 	if newPassword == "" {
 		return fmt.Errorf("new master password cannot be empty")
@@ -236,6 +245,9 @@ func (s *JournalService) ChangeMasterPassword(currentPassword string, newPasswor
 }
 
 func (s *JournalService) EncryptJournal(journalID string) (TreeResponse, error) {
+	if s.StoreKind() == StoreKindCloud {
+		return TreeResponse{}, ErrPortableEncryptionUnavailable
+	}
 	journalID = strings.TrimSpace(journalID)
 	configured, err := s.masterPasswordConfigured()
 	if err != nil {
@@ -386,6 +398,9 @@ func (s *JournalService) EncryptJournal(journalID string) (TreeResponse, error) 
 }
 
 func (s *JournalService) DecryptJournal(journalID string) (TreeResponse, error) {
+	if s.StoreKind() == StoreKindCloud {
+		return TreeResponse{}, ErrPortableEncryptionUnavailable
+	}
 	journalID = strings.TrimSpace(journalID)
 	if err := s.FlushAll(); err != nil {
 		return TreeResponse{}, err

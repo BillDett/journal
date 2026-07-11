@@ -12,7 +12,8 @@ import (
 // JournalService owns domain queries and migrations; keeping connection policy
 // here prevents future commands from silently choosing different SQLite rules.
 type SQLiteRepository struct {
-	db *sql.DB
+	db   *sql.DB
+	path string
 }
 
 func OpenSQLiteRepository(path string) (*SQLiteRepository, error) {
@@ -26,7 +27,7 @@ func OpenSQLiteRepository(path string) (*SQLiteRepository, error) {
 	// SQLite foreign-key settings are connection-local. A single connection
 	// makes that invariant reliable and serializes the embedded-app write path.
 	db.SetMaxOpenConns(1)
-	return &SQLiteRepository{db: db}, nil
+	return &SQLiteRepository{db: db, path: path}, nil
 }
 
 func (r *SQLiteRepository) Close() error {
