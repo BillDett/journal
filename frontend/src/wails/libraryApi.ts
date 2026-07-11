@@ -8,6 +8,10 @@ export type SpacingPreset = 'compact' | 'normal' | 'relaxed'
 
 export type TreeItem = {
   id: string
+  storeId: string
+  storageKind: 'local' | 'cloud'
+  cloudStatus: string
+  readOnly: boolean
   parentId: string
   kind: 'journal' | 'folder' | 'document'
   title: string
@@ -22,6 +26,11 @@ export type TreeItem = {
   itemCount: number
   children: TreeItem[]
 }
+
+export type VaultProviderRequest = { id: string, name: string, kind: string, root: string, credentialRef: string, publishDebounceMs: number, publishMaxIntervalMs: number, revisionRetentionCount: number }
+export type VaultProviderResponse = Omit<VaultProviderRequest, 'credentialRef'> & { validated: boolean }
+export type CloudMountResponse = { cloudJournalId: string, providerId: string, cachePath: string, lastRevisionId: string, syncStatus: string, lastSyncError: string, lastSyncedAt: string, readOnly: boolean, statusReason: string }
+export type CloudJournalResponse = { cloudJournalId: string, mount: CloudMountResponse, tree: TreeResponse }
 
 export type TreeResponse = {
   items: TreeItem[]
@@ -124,6 +133,15 @@ type BackendAPI = {
   SetSelectedJournalForMenu: (journalId: string) => Promise<void>
   GetAppSettings: () => Promise<AppSettingsResponse>
   UpdateAppSettings: (settings: AppSettingsPatch) => Promise<AppSettingsResponse>
+  ListVaultProviders: () => Promise<VaultProviderResponse[]>
+  SaveVaultProvider: (provider: VaultProviderRequest) => Promise<VaultProviderResponse>
+  ValidateVaultProvider: (providerId: string) => Promise<VaultProviderResponse>
+  RemoveVaultProvider: (providerId: string) => Promise<void>
+  ListCloudMounts: () => Promise<CloudMountResponse[]>
+  CreateCloudJournal: (providerId: string) => Promise<CloudJournalResponse>
+  ReconnectCloudJournal: (providerId: string, cloudJournalId: string) => Promise<CloudJournalResponse>
+  SyncCloudJournal: (cloudJournalId: string) => Promise<CloudMountResponse>
+  ReleaseCloudLease: (cloudJournalId: string) => Promise<void>
 }
 
 type WailsWindow = Window & {
@@ -176,6 +194,15 @@ function missingBackend(): BackendAPI {
     SetSelectedJournalForMenu: fail,
     GetAppSettings: fail,
     UpdateAppSettings: fail,
+    ListVaultProviders: fail,
+    SaveVaultProvider: fail,
+    ValidateVaultProvider: fail,
+    RemoveVaultProvider: fail,
+    ListCloudMounts: fail,
+    CreateCloudJournal: fail,
+    ReconnectCloudJournal: fail,
+    SyncCloudJournal: fail,
+    ReleaseCloudLease: fail,
   }
 }
 

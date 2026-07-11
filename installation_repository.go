@@ -98,6 +98,72 @@ type CloudPendingCreateRecord struct {
 	UpdatedAt      string
 }
 
+func (r *InstallationRepository) ListProviders() ([]VaultProviderRecord, error) {
+	rows, err := r.db.Query(`SELECT id, name, kind, endpoint, root_prefix, credential_ref, publish_debounce_ms, publish_max_interval_ms, revision_retention_count, created_at, updated_at FROM vault_providers ORDER BY name COLLATE NOCASE, id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var providers []VaultProviderRecord
+	for rows.Next() {
+		var p VaultProviderRecord
+		if err := rows.Scan(&p.ID, &p.Name, &p.Kind, &p.Endpoint, &p.RootPrefix, &p.CredentialRef, &p.PublishDebounceMS, &p.PublishMaxIntervalMS, &p.RevisionRetentionCount, &p.CreatedAt, &p.UpdatedAt); err != nil {
+			return nil, err
+		}
+		providers = append(providers, p)
+	}
+	return providers, rows.Err()
+}
+
+func (r *InstallationRepository) UpsertProvider(p VaultProviderRecord) (VaultProviderRecord, error) {
+	p.ID = strings.TrimSpace(p.ID)
+	if p.ID == "" {
+		p.ID = uuid.NewString()
+	}
+	p.Name = strings.TrimSpace(p.Name)
+	p.Kind = strings.TrimSpace(p.Kind)
+	p.RootPrefix = strings.TrimSpace(p.RootPrefix)
+	if p.Name == "" || p.Kind != "filesystem" || p.RootPrefix == "" {
+		return VaultProviderRecord{}, fmt.Errorf("provider name and filesystem root are required")
+	}
+	if p.PublishDebounceMS <= 0 {
+		p.PublishDebounceMS = 30000
+	}
+	if p.PublishMaxIntervalMS <= 0 {
+		p.PublishMaxIntervalMS = 300000
+	}
+	if p.RevisionRetentionCount < 2 {
+		p.RevisionRetentionCount = 50
+	}
+	now := nowString()
+	_, err := r.db.Exec(`INSERT INTO vault_providers (id,name,kind,endpoint,root_prefix,credential_ref,publish_debounce_ms,publish_max_interval_ms,revision_retention_count,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,kind=excluded.kind,endpoint=excluded.endpoint,root_prefix=excluded.root_prefix,credential_ref=excluded.credential_ref,publish_debounce_ms=excluded.publish_debounce_ms,publish_max_interval_ms=excluded.publish_max_interval_ms,revision_retention_count=excluded.revision_retention_count,updated_at=excluded.updated_at`, p.ID, p.Name, p.Kind, "", p.RootPrefix, p.CredentialRef, p.PublishDebounceMS, p.PublishMaxIntervalMS, p.RevisionRetentionCount, now, now)
+	if err != nil {
+		return VaultProviderRecord{}, err
+	}
+	return r.Provider(p.ID)
+}
+func (r *InstallationRepository) Provider(id string) (VaultProviderRecord, error) {
+	var p VaultProviderRecord
+	err := r.db.QueryRow(`SELECT id,name,kind,endpoint,root_prefix,credential_ref,publish_debounce_ms,publish_max_interval_ms,revision_retention_count,created_at,updated_at FROM vault_providers WHERE id=?`, id).Scan(&p.ID, &p.Name, &p.Kind, &p.Endpoint, &p.RootPrefix, &p.CredentialRef, &p.PublishDebounceMS, &p.PublishMaxIntervalMS, &p.RevisionRetentionCount, &p.CreatedAt, &p.UpdatedAt)
+	return p, err
+}
+func (r *InstallationRepository) ListMounts() ([]CloudJournalMountRecord, error) {
+	rows, err := r.db.Query(`SELECT cloud_journal_id,provider_id,vault_root,cache_path,last_revision_id,last_current_token,lease_id,revision_retention_count,sync_status,last_sync_error,last_synced_at,created_at,updated_at FROM cloud_journal_mounts ORDER BY updated_at DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []CloudJournalMountRecord
+	for rows.Next() {
+		var m CloudJournalMountRecord
+		if err := rows.Scan(&m.CloudJournalID, &m.ProviderID, &m.VaultRoot, &m.CachePath, &m.LastRevisionID, &m.LastCurrentToken, &m.LeaseID, &m.RevisionRetentionCount, &m.SyncStatus, &m.LastSyncError, &m.LastSyncedAt, &m.CreatedAt, &m.UpdatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, m)
+	}
+	return out, rows.Err()
+}
+
 func (r *InstallationRepository) UpsertPendingCreate(record CloudPendingCreateRecord) error {
 	if err := validateCloudJournalID(record.CloudJournalID); err != nil {
 		return err

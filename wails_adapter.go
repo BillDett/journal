@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"github.com/wailsapp/wails/v2/pkg/menu"
 	"github.com/wailsapp/wails/v2/pkg/runtime"
@@ -19,6 +20,9 @@ type App struct {
 	stores            *JournalStoreRouter
 	storeCommands     *StoreCommandRouter
 	cloudCaches       *CloudCacheManager
+	installation      *InstallationRepository
+	cloudServices     map[string]*JournalService
+	cloudMu           sync.Mutex
 	commands          *Commands
 	selectedJournalID string
 	exportJournalItem *menu.MenuItem
@@ -63,6 +67,8 @@ func (a *App) startup(ctx context.Context) {
 		panic(err)
 	}
 	a.storeCommands = storeCommands
+	a.installation = NewInstallationRepository(service.db)
+	a.cloudServices = map[string]*JournalService{}
 	a.commands = NewCommands(service)
 	a.service.StartAutosave(ctx)
 }
@@ -75,19 +81,270 @@ func (a *App) shutdown(ctx context.Context) {
 }
 
 func (a *App) GetLibraryTree() (TreeResponse, error) {
-	return a.commands.library.GetTree()
+	local, err := a.commands.library.GetTree()
+	if err != nil {
+		return TreeResponse{}, err
+	}
+	mounts, err := a.installation.ListMounts()
+	if err != nil {
+		return TreeResponse{}, err
+	}
+	for _, mount := range mounts {
+		cache, openErr := a.cloudService(mount)
+		if openErr != nil {
+			local.Items = append(local.Items, cloudPlaceholder(mount, openErr.Error()))
+			continue
+		}
+		cloudTree, treeErr := cache.GetLibraryTree()
+		if treeErr != nil {
+			local.Items = append(local.Items, cloudPlaceholder(mount, treeErr.Error()))
+			continue
+		}
+		for _, item := range cloudTree.Items {
+			if item.SystemKey == SystemTrash {
+				continue
+			}
+			decorateCloudTree(&item, mount)
+			local.Items = append(local.Items, item)
+		}
+	}
+	return local, nil
+}
+
+func (a *App) ListVaultProviders() ([]VaultProviderResponse, error) {
+	providers, err := a.installation.ListProviders()
+	if err != nil {
+		return nil, err
+	}
+	out := make([]VaultProviderResponse, 0, len(providers))
+	for _, p := range providers {
+		out = append(out, providerResponse(p, false))
+	}
+	return out, nil
+}
+func (a *App) SaveVaultProvider(request VaultProviderRequest) (VaultProviderResponse, error) {
+	p, err := a.installation.UpsertProvider(VaultProviderRecord{ID: request.ID, Name: request.Name, Kind: request.Kind, RootPrefix: request.Root, CredentialRef: request.CredentialRef, PublishDebounceMS: request.PublishDebounceMS, PublishMaxIntervalMS: request.PublishMaxIntervalMS, RevisionRetentionCount: request.RevisionRetentionCount})
+	if err != nil {
+		return VaultProviderResponse{}, err
+	}
+	return providerResponse(p, false), nil
+}
+func (a *App) ValidateVaultProvider(providerID string) (VaultProviderResponse, error) {
+	p, err := a.installation.Provider(providerID)
+	if err != nil {
+		return VaultProviderResponse{}, err
+	}
+	sync, err := a.syncForProvider(providerID)
+	if err != nil {
+		return VaultProviderResponse{}, err
+	}
+	if _, err := sync.Validate(a.ctx); err != nil {
+		return VaultProviderResponse{}, err
+	}
+	return providerResponse(p, true), nil
+}
+func (a *App) RemoveVaultProvider(providerID string) error {
+	return a.installation.RemoveProvider(providerID, func(m CloudJournalMountRecord) bool { return m.SyncStatus != "clean" })
+}
+func providerResponse(p VaultProviderRecord, validated bool) VaultProviderResponse {
+	return VaultProviderResponse{ID: p.ID, Name: p.Name, Kind: p.Kind, Root: p.RootPrefix, PublishDebounceMS: p.PublishDebounceMS, PublishMaxIntervalMS: p.PublishMaxIntervalMS, RevisionRetentionCount: p.RevisionRetentionCount, Validated: validated}
+}
+func (a *App) ListCloudMounts() ([]CloudMountResponse, error) {
+	mounts, err := a.installation.ListMounts()
+	if err != nil {
+		return nil, err
+	}
+	out := make([]CloudMountResponse, 0, len(mounts))
+	for _, m := range mounts {
+		out = append(out, mountResponse(m))
+	}
+	return out, nil
+}
+func mountResponse(m CloudJournalMountRecord) CloudMountResponse {
+	readOnly := m.SyncStatus == "locked_read_only" || m.SyncStatus == "provider_missing" || m.SyncStatus == "conflict"
+	return CloudMountResponse{CloudJournalID: m.CloudJournalID, ProviderID: m.ProviderID, CachePath: m.CachePath, LastRevisionID: m.LastRevisionID, SyncStatus: m.SyncStatus, LastSyncError: m.LastSyncError, LastSyncedAt: m.LastSyncedAt, ReadOnly: readOnly, StatusReason: m.SyncStatus}
+}
+func (a *App) CreateCloudJournal(providerID string) (CloudJournalResponse, error) {
+	sync, err := a.syncForProvider(providerID)
+	if err != nil {
+		return CloudJournalResponse{}, err
+	}
+	cache, id, err := sync.CreateCloudJournal(a.ctx)
+	if err != nil {
+		return CloudJournalResponse{}, err
+	}
+	a.cloudMu.Lock()
+	a.cloudServices[id] = cache
+	a.cloudMu.Unlock()
+	_ = a.storeCommands.Register(cache)
+	mount, err := sync.mount(id)
+	if err != nil {
+		return CloudJournalResponse{}, err
+	}
+	tree, err := a.GetLibraryTree()
+	return CloudJournalResponse{CloudJournalID: id, Mount: mountResponse(mount), Tree: tree}, err
+}
+func (a *App) ReconnectCloudJournal(providerID, cloudJournalID string) (CloudJournalResponse, error) {
+	sync, err := a.syncForProvider(providerID)
+	if err != nil {
+		return CloudJournalResponse{}, err
+	}
+	cache, err := sync.ReconnectCloudJournal(a.ctx, cloudJournalID)
+	if err != nil {
+		return CloudJournalResponse{}, err
+	}
+	a.cloudMu.Lock()
+	a.cloudServices[cloudJournalID] = cache
+	a.cloudMu.Unlock()
+	_ = a.storeCommands.Register(cache)
+	mount, err := sync.mount(cloudJournalID)
+	if err != nil {
+		return CloudJournalResponse{}, err
+	}
+	tree, err := a.GetLibraryTree()
+	return CloudJournalResponse{CloudJournalID: cloudJournalID, Mount: mountResponse(mount), Tree: tree}, err
+}
+func (a *App) SyncCloudJournal(cloudJournalID string) (CloudMountResponse, error) {
+	mount, err := a.installationMount(cloudJournalID)
+	if err != nil {
+		return CloudMountResponse{}, err
+	}
+	sync, err := a.syncForProvider(mount.ProviderID)
+	if err != nil {
+		return CloudMountResponse{}, err
+	}
+	cache, err := a.cloudService(mount)
+	if err != nil {
+		return CloudMountResponse{}, err
+	}
+	if err := sync.Publish(a.ctx, cache, cloudJournalID); err != nil {
+		return CloudMountResponse{}, err
+	}
+	mount, err = sync.mount(cloudJournalID)
+	return mountResponse(mount), err
+}
+func (a *App) ReleaseCloudLease(cloudJournalID string) error {
+	m, err := a.installationMount(cloudJournalID)
+	if err != nil {
+		return err
+	}
+	sync, err := a.syncForProvider(m.ProviderID)
+	if err != nil {
+		return err
+	}
+	return sync.ReleaseLease(a.ctx, cloudJournalID, m.LeaseID)
+}
+func (a *App) installationMount(id string) (CloudJournalMountRecord, error) {
+	mounts, err := a.installation.ListMounts()
+	if err != nil {
+		return CloudJournalMountRecord{}, err
+	}
+	for _, m := range mounts {
+		if m.CloudJournalID == id {
+			return m, nil
+		}
+	}
+	return CloudJournalMountRecord{}, fmt.Errorf("cache_missing")
+}
+
+func cloudPlaceholder(mount CloudJournalMountRecord, reason string) TreeItem {
+	return TreeItem{ID: mount.CloudJournalID, StoreID: string(CloudStoreID(mount.CloudJournalID)), StorageKind: string(StoreKindCloud), CloudStatus: mount.SyncStatus, ReadOnly: true, Kind: KindJournal, Title: "Cloud Journal", CreatedAt: mount.CreatedAt, UpdatedAt: mount.UpdatedAt, EncryptionState: EncryptionPlaintext, Children: []TreeItem{}}
+}
+func decorateCloudTree(item *TreeItem, mount CloudJournalMountRecord) {
+	item.CloudStatus = mount.SyncStatus
+	item.ReadOnly = mount.SyncStatus != "clean" && mount.SyncStatus != "dirty"
+	for i := range item.Children {
+		decorateCloudTree(&item.Children[i], mount)
+	}
+}
+
+func (a *App) cloudService(mount CloudJournalMountRecord) (*JournalService, error) {
+	a.cloudMu.Lock()
+	defer a.cloudMu.Unlock()
+	if service := a.cloudServices[mount.CloudJournalID]; service != nil {
+		return service, nil
+	}
+	if mount.ProviderID == "" {
+		return nil, fmt.Errorf("provider missing")
+	}
+	service, err := a.cloudCaches.OpenCloudCache(mount.CloudJournalID)
+	if err != nil {
+		return nil, err
+	}
+	if err := a.storeCommands.Register(service); err != nil {
+		_ = service.Close()
+		return nil, err
+	}
+	a.cloudServices[mount.CloudJournalID] = service
+	return service, nil
+}
+
+func (a *App) contentServiceForItem(id string) *JournalService {
+	if _, err := a.service.getRawRowItemFrom(a.service.db, id); err == nil {
+		return a.service
+	}
+	a.cloudMu.Lock()
+	defer a.cloudMu.Unlock()
+	for _, service := range a.cloudServices {
+		if _, err := service.getRawRowItemFrom(service.db, id); err == nil {
+			return service
+		}
+	}
+	return a.service
+}
+
+func (a *App) requireWritable(service *JournalService) error {
+	if service.StoreKind() != StoreKindCloud {
+		return nil
+	}
+	mount, err := a.installationMount(strings.TrimPrefix(string(service.StoreID()), "cloud:"))
+	if err != nil {
+		return err
+	}
+	sync, err := a.syncForProvider(mount.ProviderID)
+	if err != nil {
+		return err
+	}
+	return (&CloudJournalStore{Journal: service, Sync: sync, CloudJournalID: mount.CloudJournalID}).EnsureWritable(a.ctx)
+}
+
+func (a *App) syncForProvider(providerID string) (*VaultSyncService, error) {
+	p, err := a.installation.Provider(providerID)
+	if err != nil {
+		return nil, err
+	}
+	if p.Kind != "filesystem" {
+		return nil, fmt.Errorf("provider_capability_missing")
+	}
+	device, err := a.installation.DeviceIdentity()
+	if err != nil {
+		return nil, err
+	}
+	return &VaultSyncService{Store: FilesystemVaultStore{}, Provider: VaultProvider{ID: p.ID, Root: p.RootPrefix}, Caches: a.cloudCaches, Mounts: a.installation, Device: device}, nil
 }
 
 func (a *App) CreateDocument(parentID string) (DocumentResponse, error) {
-	return a.commands.documents.Create(parentID)
+	service := a.contentServiceForItem(parentID)
+	if err := a.requireWritable(service); err != nil {
+		return DocumentResponse{}, err
+	}
+	return service.CreateDocument(parentID)
 }
 
 func (a *App) DuplicateDocument(id string) (DocumentResponse, error) {
-	return a.commands.documents.Duplicate(id)
+	service := a.contentServiceForItem(id)
+	if err := a.requireWritable(service); err != nil {
+		return DocumentResponse{}, err
+	}
+	return service.DuplicateDocument(id)
 }
 
 func (a *App) CreateFolder(parentID string, title string) (ItemResponse, error) {
-	return a.commands.library.CreateFolder(parentID, title)
+	service := a.contentServiceForItem(parentID)
+	if err := a.requireWritable(service); err != nil {
+		return ItemResponse{}, err
+	}
+	return service.CreateFolder(parentID, title)
 }
 
 func (a *App) CreateJournal(title string) (ItemResponse, error) {
@@ -95,7 +352,11 @@ func (a *App) CreateJournal(title string) (ItemResponse, error) {
 }
 
 func (a *App) RenameItem(id string, title string) (ItemResponse, error) {
-	return a.commands.library.RenameItem(id, title)
+	service := a.contentServiceForItem(id)
+	if err := a.requireWritable(service); err != nil {
+		return ItemResponse{}, err
+	}
+	return service.RenameItem(id, title)
 }
 
 func (a *App) MoveItem(id string, newParentID string, newSortOrder int) (TreeResponse, error) {
@@ -111,7 +372,7 @@ func (a *App) DeleteJournal(id string) (TreeResponse, error) {
 }
 
 func (a *App) OpenDocument(id string) (DocumentResponse, error) {
-	return a.commands.documents.Open(id)
+	return a.contentServiceForItem(id).OpenDocument(id)
 }
 
 func (a *App) UpdateDocumentDraft(id string, content map[string]any, version int64) (DocumentDraftResponse, error) {

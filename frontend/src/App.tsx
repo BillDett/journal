@@ -49,6 +49,7 @@ import {
   type ProseMirrorDoc,
   type SpacingPreset,
   type TreeItem,
+  type VaultProviderResponse,
 } from './wails/libraryApi'
 import appIcon from './assets/appicon.png'
 import {BrowserOpenURL, EventsOn} from '../wailsjs/runtime/runtime'
@@ -119,6 +120,10 @@ function App() {
     encryptedJournalIds: [],
   })
   const [libraryWidth, setLibraryWidth] = useState(libraryWidthDefault)
+  const [providers, setProviders] = useState<VaultProviderResponse[]>([])
+  const [providerName, setProviderName] = useState('Local Vault')
+  const [providerRoot, setProviderRoot] = useState('')
+  const [cloudJournalID, setCloudJournalID] = useState('')
   const autosaveTimer = useRef<number | undefined>(undefined)
   const operationCoordinator = useRef(new OperationCoordinator())
   const selectedJournalIdRef = useRef('')
@@ -187,11 +192,12 @@ function App() {
     const requestVersion = operationCoordinator.current.nextTreeRequest()
     async function boot() {
       try {
-        const [treeResponse, settings, info, encryption] = await Promise.all([api.GetLibraryTree(), api.GetAppSettings(), api.GetAppInfo(), api.GetEncryptionStatus()])
+        const [treeResponse, settings, info, encryption, providerList] = await Promise.all([api.GetLibraryTree(), api.GetAppSettings(), api.GetAppInfo(), api.GetEncryptionStatus(), api.ListVaultProviders()])
         if (!live) return
         if (operationCoordinator.current.isCurrentTreeRequest(requestVersion)) applyTree(treeResponse.items, treeResponse.trashId)
         setAutosaveInterval(settings.autosaveIntervalMs)
         setLibraryWidth(clampNumber(settings.libraryWidth || libraryWidthDefault, libraryWidthMin, libraryWidthMax))
+        setProviders(providerList)
         setAppInfo(info)
         setEncryptionStatus(encryption)
         if (settings.lastDocumentId) {
@@ -459,6 +465,44 @@ function App() {
     } catch (error) {
       setLastError(messageFromError(error))
     }
+  }
+
+  async function saveFilesystemProvider() {
+    try {
+      const provider = await api.SaveVaultProvider({id: '', name: providerName, kind: 'filesystem', root: providerRoot, credentialRef: '', publishDebounceMs: 30000, publishMaxIntervalMs: 300000, revisionRetentionCount: 50})
+      await api.ValidateVaultProvider(provider.id)
+      setProviders(await api.ListVaultProviders())
+      setStatus('Vault provider validated')
+    } catch (error) { setLastError(messageFromError(error)) }
+  }
+
+  async function createCloudJournal() {
+    const provider = providers[0]
+    if (!provider) { setSettingsOpen(true); setLastError('Add and validate a Vault provider first.'); return }
+    try {
+      const response = await api.CreateCloudJournal(provider.id)
+      await refreshVisibleTree(response.tree.items, response.tree.trashId)
+      setSelectedItemId(response.cloudJournalId)
+      setExpanded((current) => new Set([...current, response.cloudJournalId]))
+      setStatus('Cloud Journal created and synced')
+    } catch (error) { setLastError(messageFromError(error)) }
+  }
+
+  async function reconnectCloudJournal() {
+    const provider = providers[0]
+    if (!provider || !cloudJournalID.trim()) return
+    try {
+      const response = await api.ReconnectCloudJournal(provider.id, cloudJournalID.trim())
+      await refreshVisibleTree(response.tree.items, response.tree.trashId)
+      setStatus(response.mount.readOnly ? 'Cloud Journal recovered read-only (lease held elsewhere)' : 'Cloud Journal recovered')
+      setCloudJournalID('')
+    } catch (error) { setLastError(messageFromError(error)) }
+  }
+
+  async function syncSelectedCloudJournal() {
+    const journal = selectedJournal
+    if (!journal || journal.storageKind !== 'cloud') return
+    try { const mount = await api.SyncCloudJournal(journal.id); await loadTree(); setStatus(mount.readOnly ? 'Cloud Journal is read-only' : 'Cloud Journal synced') } catch (error) { setLastError(messageFromError(error)) }
   }
 
   async function exportJournalById(journalId: string) {
@@ -775,6 +819,7 @@ function App() {
           <div className="library-head">
             <div className="mini-actions">
               <button type="button" onClick={() => void createJournal()} disabled={creationDisabled} title="New journal"><BookPlus size={15}/></button>
+              <button type="button" onClick={() => void createCloudJournal()} disabled={creationDisabled} title="New cloud journal"><BookPlus size={15}/></button>
               <button type="button" onClick={() => void createDocument(creationParentId)} disabled={creationDisabled} title="New document"><FilePlus size={15}/></button>
               <button type="button" onClick={() => void createFolder(creationParentId)} disabled={creationDisabled} title="New folder"><FolderPlus size={15}/></button>
               <button type="button" className={settingsOpen ? 'icon-button active' : 'icon-button'} onClick={() => setSettingsOpen((value) => !value)} title="Autosave settings"><Settings size={15}/></button>
@@ -881,6 +926,21 @@ function App() {
               {encryptionStatus.masterPasswordConfigured && (
                 <button type="button" onClick={() => setEncryptionDialog({mode: 'change'})}><KeyRound size={14}/>Change master password</button>
               )}
+              <label>
+                Vault name
+                <input value={providerName} onChange={(event) => setProviderName(event.target.value)} placeholder="Local Vault" />
+              </label>
+              <label>
+                Vault folder
+                <input value={providerRoot} onChange={(event) => setProviderRoot(event.target.value)} placeholder="/path/to/vault" />
+              </label>
+              <button type="button" onClick={() => void saveFilesystemProvider()}>Add local Vault provider</button>
+              <label>
+                Reconnect cloud Journal ID
+                <input value={cloudJournalID} onChange={(event) => setCloudJournalID(event.target.value)} placeholder="Journal UUID" />
+              </label>
+              <button type="button" onClick={() => void reconnectCloudJournal()} disabled={!providers.length || !cloudJournalID.trim()}>Reconnect</button>
+              {selectedJournal?.storageKind === 'cloud' && <button type="button" onClick={() => void syncSelectedCloudJournal()} disabled={selectedJournal.readOnly}>Sync now</button>}
             </div>
           )}
 
@@ -1624,6 +1684,7 @@ function TreeNode(props: TreeNodeProps) {
   const isTrash = item.id === trashId
   const isEncryptedJournal = isJournal && item.encryptionState === 'encrypted'
   const isLockedJournal = isEncryptedJournal && item.encryptionLocked
+  const isReadOnly = item.readOnly
   const deleteDisabled = isJournal && journalCount <= 1
   const isMatch = searchResults.has(item.id)
   const [draftTitle, setDraftTitle] = useState(item.title)
@@ -1648,7 +1709,7 @@ function TreeNode(props: TreeNodeProps) {
         style={{paddingLeft: 10 + level * 16}}
         role="treeitem"
         tabIndex={0}
-        draggable={!isTrash}
+        draggable={!isTrash && !isReadOnly}
         onClick={() => props.onSelect(item.id)}
         onDragStart={() => props.onDragStart(item.id)}
         onDragOver={(event) => {
@@ -1669,7 +1730,7 @@ function TreeNode(props: TreeNodeProps) {
           if (event.key === 'ArrowRight' && isContainer) props.onToggle(item.id)
           if (event.key === 'ArrowLeft' && isContainer) props.onToggle(item.id)
         }}
-        onDoubleClick={() => !isTrash && props.onRenameStart(item.id)}
+        onDoubleClick={() => !isTrash && !isReadOnly && props.onRenameStart(item.id)}
       >
         <button type="button" className="tree-chevron" onClick={(event) => {
           event.stopPropagation()
@@ -1709,27 +1770,27 @@ function TreeNode(props: TreeNodeProps) {
           {isContainer && !isTrash && <button type="button" onClick={(event) => {
             event.stopPropagation()
             props.onCreateDocument(item.id)
-          }} disabled={props.creationDisabled || isLockedJournal} title="New document"><Plus size={13}/></button>}
+          }} disabled={props.creationDisabled || isLockedJournal || isReadOnly} title="New document"><Plus size={13}/></button>}
           {item.kind === 'document' && !isTrash && <button type="button" onClick={(event) => {
             event.stopPropagation()
             props.onDuplicateDocument(item.id)
-          }} title="Duplicate document"><Files size={13}/></button>}
+          }} disabled={isReadOnly} title="Duplicate document"><Files size={13}/></button>}
           {isContainer && !isTrash && <button type="button" onClick={(event) => {
             event.stopPropagation()
             props.onCreateFolder(item.id)
-          }} disabled={props.creationDisabled || isLockedJournal} title="New folder"><FolderPlus size={13}/></button>}
+          }} disabled={props.creationDisabled || isLockedJournal || isReadOnly} title="New folder"><FolderPlus size={13}/></button>}
           {isJournal && !isTrash && !isEncryptedJournal && <button type="button" onClick={(event) => {
             event.stopPropagation()
             props.onEncryptJournal(item.id)
-          }} title="Encrypt journal"><Lock size={13}/></button>}
+          }} disabled={isReadOnly} title="Encrypt journal"><Lock size={13}/></button>}
           {isJournal && !isTrash && isEncryptedJournal && <button type="button" onClick={(event) => {
             event.stopPropagation()
             props.onDecryptJournal(item.id)
-          }} title="Turn off encryption"><Unlock size={13}/></button>}
+          }} disabled={isReadOnly} title="Turn off encryption"><Unlock size={13}/></button>}
           {!isTrash && <button type="button" onClick={(event) => {
             event.stopPropagation()
             props.onDelete(item.id)
-          }} disabled={deleteDisabled} title={deleteDisabled ? 'At least one journal is required' : 'Delete'}><Trash2 size={13}/></button>}
+          }} disabled={deleteDisabled || isReadOnly} title={deleteDisabled ? 'At least one journal is required' : 'Delete'}><Trash2 size={13}/></button>}
         </div>
       </div>
       {isContainer && isExpanded && item.children.map((child) => (

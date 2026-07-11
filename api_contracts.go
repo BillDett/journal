@@ -100,3 +100,43 @@ type TrashItemCommand struct {
 	ID              string `json:"id"`
 	ExpectedInTrash bool   `json:"expectedInTrash"`
 }
+
+type VaultProviderRequest struct {
+	ID                     string `json:"id"`
+	Name                   string `json:"name"`
+	Kind                   string `json:"kind"`
+	Root                   string `json:"root"`
+	CredentialRef          string `json:"credentialRef"`
+	PublishDebounceMS      int    `json:"publishDebounceMs"`
+	PublishMaxIntervalMS   int    `json:"publishMaxIntervalMs"`
+	RevisionRetentionCount int    `json:"revisionRetentionCount"`
+}
+
+type VaultProviderResponse struct {
+	ID                     string `json:"id"`
+	Name                   string `json:"name"`
+	Kind                   string `json:"kind"`
+	Root                   string `json:"root"`
+	PublishDebounceMS      int    `json:"publishDebounceMs"`
+	PublishMaxIntervalMS   int    `json:"publishMaxIntervalMs"`
+	RevisionRetentionCount int    `json:"revisionRetentionCount"`
+	Validated              bool   `json:"validated"`
+}
+
+type CloudMountResponse struct {
+	CloudJournalID string `json:"cloudJournalId"`
+	ProviderID     string `json:"providerId"`
+	CachePath      string `json:"cachePath"`
+	LastRevisionID string `json:"lastRevisionId"`
+	SyncStatus     string `json:"syncStatus"`
+	LastSyncError  string `json:"lastSyncError"`
+	LastSyncedAt   string `json:"lastSyncedAt"`
+	ReadOnly       bool   `json:"readOnly"`
+	StatusReason   string `json:"statusReason"`
+}
+
+type CloudJournalResponse struct {
+	CloudJournalID string             `json:"cloudJournalId"`
+	Mount          CloudMountResponse `json:"mount"`
+	Tree           TreeResponse       `json:"tree"`
+}
