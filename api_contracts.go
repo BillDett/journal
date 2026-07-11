@@ -6,6 +6,10 @@ package main
 
 type TreeItem struct {
 	ID               string     `json:"id"`
+	StoreID          string     `json:"storeId"`
+	StorageKind      string     `json:"storageKind"`
+	CloudStatus      string     `json:"cloudStatus"`
+	ReadOnly         bool       `json:"readOnly"`
 	ParentID         string     `json:"parentId"`
 	Kind             string     `json:"kind"`
 	Title            string     `json:"title"`

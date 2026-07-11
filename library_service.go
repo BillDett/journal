@@ -20,7 +20,20 @@ func (s *JournalService) GetLibraryTree() (TreeResponse, error) {
 	if err != nil {
 		return TreeResponse{}, err
 	}
-	return TreeResponse{Items: buildTree(items, nil), TrashID: trashID}, nil
+	tree := buildTree(items, nil)
+	decorateTreeStore(tree, s.StoreID(), s.StoreKind())
+	return TreeResponse{Items: tree, TrashID: trashID}, nil
+}
+
+func decorateTreeStore(items []TreeItem, storeID StoreID, kind StoreKind) {
+	for index := range items {
+		items[index].StoreID = string(storeID)
+		items[index].StorageKind = string(kind)
+		if kind == StoreKindLocal {
+			items[index].CloudStatus = ""
+		}
+		decorateTreeStore(items[index].Children, storeID, kind)
+	}
 }
 
 func (s *JournalService) CreateFolder(parentID string, title string) (ItemResponse, error) {
@@ -80,6 +93,9 @@ func (s *JournalService) CreateFolder(parentID string, title string) (ItemRespon
 }
 
 func (s *JournalService) CreateJournal(title string) (ItemResponse, error) {
+	if s.StoreKind() == StoreKindCloud {
+		return ItemResponse{}, fmt.Errorf("cloud Journal root is immutable")
+	}
 	title = normalizeTitle(title, "New Journal")
 	now := nowString()
 	id := uuid.NewString()

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"path/filepath"
 	"strings"
 
 	"github.com/wailsapp/wails/v2/pkg/menu"
@@ -15,6 +16,9 @@ import (
 type App struct {
 	ctx               context.Context
 	service           *JournalService
+	stores            *JournalStoreRouter
+	storeCommands     *StoreCommandRouter
+	cloudCaches       *CloudCacheManager
 	commands          *Commands
 	selectedJournalID string
 	exportJournalItem *menu.MenuItem
@@ -40,6 +44,25 @@ func (a *App) startup(ctx context.Context) {
 		panic(err)
 	}
 	a.service = service
+	router, err := NewJournalStoreRouter(service.store)
+	if err != nil {
+		panic(err)
+	}
+	cacheConfigDir := filepath.Dir(dbPath)
+	if filepath.Base(cacheConfigDir) == "Journal" {
+		cacheConfigDir = filepath.Dir(cacheConfigDir)
+	}
+	cloudCaches, err := NewCloudCacheManager(cacheConfigDir, router)
+	if err != nil {
+		panic(err)
+	}
+	a.stores = router
+	a.cloudCaches = cloudCaches
+	storeCommands, err := NewStoreCommandRouter(router, service)
+	if err != nil {
+		panic(err)
+	}
+	a.storeCommands = storeCommands
 	a.commands = NewCommands(service)
 	a.service.StartAutosave(ctx)
 }

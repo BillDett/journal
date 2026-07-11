@@ -31,6 +31,7 @@ type pendingDraft struct {
 
 type JournalService struct {
 	repository       *SQLiteRepository
+	store            JournalStore
 	db               *sql.DB
 	mu               sync.Mutex
 	operationMu      sync.Mutex
@@ -42,25 +43,53 @@ type JournalService struct {
 }
 
 func OpenJournalService(path string) (*JournalService, error) {
-	repository, err := OpenSQLiteRepository(path)
+	store, err := openSQLiteJournalStore(path, LocalStoreID, StoreKindLocal)
 	if err != nil {
 		return nil, err
 	}
-
-	service := &JournalService{
-		repository:       repository,
-		db:               repository.db,
-		pending:          map[string]pendingDraft{},
-		lastDraftVersion: map[string]int64{},
-		journalKeys:      map[string][]byte{},
-	}
+	service := newJournalService(store)
 	if err := service.migrate(); err != nil {
-		_ = repository.Close()
+		_ = store.Close()
 		return nil, err
 	}
 	return service, nil
 }
 
+func newJournalService(store JournalStore) *JournalService {
+	repository, _ := store.(*sqliteJournalStore)
+	service := &JournalService{
+		store:            store,
+		db:               store.Database(),
+		pending:          map[string]pendingDraft{},
+		lastDraftVersion: map[string]int64{},
+		journalKeys:      map[string][]byte{},
+	}
+	if repository != nil {
+		service.repository = repository.repository
+	}
+	return service
+}
+
 func (s *JournalService) Close() error {
-	return s.repository.Close()
+	if s.store != nil {
+		return s.store.Close()
+	}
+	if s.repository != nil {
+		return s.repository.Close()
+	}
+	return nil
+}
+
+func (s *JournalService) StoreID() StoreID {
+	if s.store == nil {
+		return LocalStoreID
+	}
+	return s.store.ID()
+}
+
+func (s *JournalService) StoreKind() StoreKind {
+	if s.store == nil {
+		return StoreKindLocal
+	}
+	return s.store.Kind()
 }

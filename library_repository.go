@@ -10,6 +10,9 @@ import (
 // Library persistence queries, hierarchy traversal, and encrypted display projection.
 
 func (s *JournalService) loadItems() ([]rowItem, error) {
+	if err := s.ensureCloudStoreScope(); err != nil {
+		return nil, err
+	}
 	rows, err := s.db.Query(
 		`SELECT id, parent_id, kind, title, sort_order, system_key, created_at, updated_at,
 		        encryption_state, encryption_key_id, title_ciphertext
@@ -47,6 +50,9 @@ func (s *JournalService) getRowItemFrom(db queryRower, id string) (rowItem, erro
 }
 
 func (s *JournalService) getRawRowItemFrom(db queryRower, id string) (rowItem, error) {
+	if err := s.validateCloudItemAccess(db, id); err != nil {
+		return rowItem{}, err
+	}
 	var item rowItem
 	err := db.QueryRow(
 		`SELECT id, parent_id, kind, title, sort_order, system_key, created_at, updated_at,

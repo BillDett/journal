@@ -15,76 +15,11 @@ func (s *JournalService) migrateV1() error {
 	if _, err := s.db.Exec(`PRAGMA foreign_keys = ON`); err != nil {
 		return err
 	}
-	statements := []string{
-		`CREATE TABLE IF NOT EXISTS items (
-			id TEXT PRIMARY KEY,
-			parent_id TEXT NULL REFERENCES items(id) ON DELETE CASCADE,
-			kind TEXT NOT NULL CHECK (kind IN ('journal', 'folder', 'document')),
-			title TEXT NOT NULL,
-			sort_order INTEGER NOT NULL DEFAULT 0,
-			system_key TEXT NULL UNIQUE,
-			created_at TEXT NOT NULL,
-			updated_at TEXT NOT NULL,
-			encryption_state TEXT NOT NULL DEFAULT 'plaintext',
-			encryption_key_id TEXT NULL,
-			title_ciphertext BLOB NULL
-		)`,
-		`CREATE TABLE IF NOT EXISTS documents (
-			item_id TEXT PRIMARY KEY REFERENCES items(id) ON DELETE CASCADE,
-			schema_version INTEGER NOT NULL,
-			content_json TEXT NOT NULL,
-			content_ciphertext BLOB NULL,
-			spacing_preset TEXT NOT NULL DEFAULT 'compact',
-			created_at TEXT NOT NULL,
-			updated_at TEXT NOT NULL
-		)`,
-		`CREATE VIRTUAL TABLE IF NOT EXISTS library_search_fts USING fts5(
-			item_id UNINDEXED,
-			kind UNINDEXED,
-			title,
-			body
-		)`,
-		`CREATE TABLE IF NOT EXISTS app_settings (
-			key TEXT PRIMARY KEY,
-			value TEXT NOT NULL,
-			updated_at TEXT NOT NULL
-		)`,
-		`CREATE TABLE IF NOT EXISTS document_attachments (
-			id TEXT PRIMARY KEY,
-			document_id TEXT NOT NULL REFERENCES documents(item_id) ON DELETE CASCADE,
-			mime_type TEXT NOT NULL,
-			original_name TEXT NOT NULL DEFAULT '',
-			size_bytes INTEGER NOT NULL,
-			content_blob BLOB NULL,
-			content_ciphertext BLOB NULL,
-			created_at TEXT NOT NULL,
-			detached_at TEXT NULL
-		)`,
-		`CREATE INDEX IF NOT EXISTS idx_document_attachments_document ON document_attachments(document_id)`,
-		`CREATE TABLE IF NOT EXISTS encryption_master (
-			id INTEGER PRIMARY KEY CHECK (id = 1),
-			kdf TEXT NOT NULL,
-			kdf_params_json TEXT NOT NULL,
-			salt BLOB NOT NULL,
-			verifier_nonce BLOB NOT NULL,
-			verifier_ciphertext BLOB NOT NULL,
-			created_at TEXT NOT NULL,
-			updated_at TEXT NOT NULL
-		)`,
-		`CREATE TABLE IF NOT EXISTS journal_encryption_keys (
-			key_id TEXT PRIMARY KEY,
-			journal_id TEXT NOT NULL UNIQUE REFERENCES items(id) ON DELETE CASCADE,
-			wrapped_key_nonce BLOB NOT NULL,
-			wrapped_key_ciphertext BLOB NOT NULL,
-			created_at TEXT NOT NULL,
-			updated_at TEXT NOT NULL
-		)`,
-		`CREATE INDEX IF NOT EXISTS idx_items_parent_sort ON items(parent_id, sort_order, title)`,
+	if err := applyContentSchema(s.db); err != nil {
+		return err
 	}
-	for _, statement := range statements {
-		if _, err := s.db.Exec(statement); err != nil {
-			return err
-		}
+	if err := applyInstallationSchema(s.db); err != nil {
+		return err
 	}
 	if err := s.migrateItemsKindConstraint(); err != nil {
 		return err
@@ -108,6 +43,25 @@ func (s *JournalService) migrateV1() error {
 		return err
 	}
 	return s.ensureSetting(settingLastDocumentID, "")
+}
+
+// migrateV2 upgrades existing installation databases that were already at the
+// original user_version. Cloud caches use migrateCloudCacheSchema instead, so
+// installation-only tables cannot appear in a cache by accident.
+func (s *JournalService) migrateV2() error {
+	if _, err := s.db.Exec(`PRAGMA foreign_keys = ON`); err != nil {
+		return err
+	}
+	if err := applyContentSchema(s.db); err != nil {
+		return err
+	}
+	if err := applyInstallationSchema(s.db); err != nil {
+		return err
+	}
+	if err := s.ensureDeviceIdentity(); err != nil {
+		return err
+	}
+	return nil
 }
 
 func (s *JournalService) ensureTrash() error {
