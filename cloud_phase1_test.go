@@ -406,6 +406,33 @@ func TestCloudDocumentAttachmentRPCUsesOwningStore(t *testing.T) {
 	}
 }
 
+func TestCloudDocumentTrashRPCUsesOwningStore(t *testing.T) {
+	app := newCloudAppForTest(t)
+	cloud, err := app.CreateLocalCloudJournal()
+	if err != nil {
+		t.Fatalf("create cloud Journal: %v", err)
+	}
+	document, err := app.CreateDocument(cloud.CloudJournalID)
+	if err != nil {
+		t.Fatalf("create cloud document: %v", err)
+	}
+	if _, err := app.SyncCloudJournal(cloud.CloudJournalID); err != nil {
+		t.Fatalf("sync cloud Journal before delete: %v", err)
+	}
+	if _, err := app.TrashItem(TrashItemCommand{ID: document.ID, ExpectedInTrash: false}); err != nil {
+		t.Fatalf("trash cloud document through RPC: %v", err)
+	}
+	service := app.cloudServices[cloud.CloudJournalID]
+	inTrash, err := service.isInTrash(document.ID)
+	if err != nil || !inTrash {
+		t.Fatalf("cloud document was not moved to its cache trash: %v / %v", inTrash, err)
+	}
+	mount, err := app.installationMount(cloud.CloudJournalID)
+	if err != nil || mount.SyncStatus != "dirty" {
+		t.Fatalf("trashing cloud document should await sync, got %#v / %v", mount, err)
+	}
+}
+
 func TestCloudWriteReacquiresExpiredLocalLease(t *testing.T) {
 	app := newCloudAppForTest(t)
 	cloud, err := app.CreateLocalCloudJournal()

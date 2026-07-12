@@ -277,7 +277,7 @@ func (s *JournalService) ensureCloudJournalRoot(cloudJournalID string) error {
 
 // ValidateCloudJournalScope rejects a cache before it becomes routable. It
 // verifies role separation, one Journal root, one system Trash, and that every
-// non-Trash item belongs to the Journal-root subtree.
+// item belongs to either the Journal-root subtree or the system-Trash subtree.
 func (s *JournalService) ValidateCloudJournalScope(cloudJournalID string) error {
 	if err := validateCloudJournalID(cloudJournalID); err != nil {
 		return err
@@ -323,13 +323,15 @@ func (s *JournalService) ValidateCloudJournalScope(cloudJournalID string) error 
 	if trashCount != 1 {
 		return fmt.Errorf("cloud_scope_invalid: expected one system Trash")
 	}
-	query := `WITH RECURSIVE journal_items(id) AS (
+	query := `WITH RECURSIVE allowed_items(id) AS (
 		SELECT id FROM items WHERE id = ?
+		UNION
+		SELECT id FROM items WHERE system_key = ?
 		UNION ALL
-		SELECT child.id FROM items child JOIN journal_items parent ON child.parent_id = parent.id
+		SELECT child.id FROM items child JOIN allowed_items parent ON child.parent_id = parent.id
 	)
 	SELECT COUNT(*) FROM items
-	WHERE COALESCE(system_key, '') != ? AND id NOT IN (SELECT id FROM journal_items)`
+	WHERE id NOT IN (SELECT id FROM allowed_items)`
 	if err := s.db.QueryRow(query, cloudJournalID, SystemTrash).Scan(&invalidCount); err != nil {
 		return err
 	}
@@ -359,17 +361,15 @@ func (s *JournalService) validateCloudItemAccess(db queryRower, itemID string) e
 		return fmt.Errorf("cloud_scope_invalid: cloud metadata: %w", err)
 	}
 	var allowed int
-	query := `WITH RECURSIVE journal_items(id) AS (
+	query := `WITH RECURSIVE allowed_items(id) AS (
 		SELECT id FROM items WHERE id = ?
+		UNION
+		SELECT id FROM items WHERE system_key = ?
 		UNION ALL
-		SELECT child.id FROM items child JOIN journal_items parent ON child.parent_id = parent.id
+		SELECT child.id FROM items child JOIN allowed_items parent ON child.parent_id = parent.id
 	)
-	SELECT EXISTS(
-		SELECT 1 FROM journal_items WHERE id = ?
-		UNION ALL
-		SELECT 1 FROM items WHERE id = ? AND system_key = ?
-	)`
-	if err := db.QueryRow(query, cloudJournalID, itemID, itemID, SystemTrash).Scan(&allowed); err != nil {
+	SELECT EXISTS(SELECT 1 FROM allowed_items WHERE id = ?)`
+	if err := db.QueryRow(query, cloudJournalID, SystemTrash, itemID).Scan(&allowed); err != nil {
 		return err
 	}
 	if allowed == 0 {

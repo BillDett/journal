@@ -426,7 +426,17 @@ func (a *App) MoveItem(id string, newParentID string, newSortOrder int) (TreeRes
 }
 
 func (a *App) TrashItem(command TrashItemCommand) (TreeResponse, error) {
-	return a.commands.library.TrashItem(command)
+	service := a.contentServiceForItem(command.ID)
+	if err := a.requireWritable(service); err != nil {
+		return TreeResponse{}, err
+	}
+	if _, err := service.TrashItem(command); err != nil {
+		return TreeResponse{}, err
+	}
+	if err := a.markCloudDirty(service); err != nil {
+		return TreeResponse{}, err
+	}
+	return a.GetLibraryTree()
 }
 
 func (a *App) DeleteJournal(id string) (TreeResponse, error) {

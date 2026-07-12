@@ -125,6 +125,7 @@ type VaultCurrent struct {
 	RevisionNumber     int64                 `json:"revisionNumber"`
 	RevisionManifest   VaultObjectDescriptor `json:"revisionManifest"`
 	UpdatedAt          time.Time             `json:"updatedAt"`
+	UpdatedAtLocal     string                `json:"updatedAtLocal,omitempty"`
 	PreviousRevisionID string                `json:"previousRevisionId,omitempty"`
 	PortableEncryption struct {
 		Enabled         bool `json:"enabled"`
@@ -139,6 +140,7 @@ type VaultRevisionManifest struct {
 	RevisionNumber    int64                  `json:"revisionNumber"`
 	ParentRevisionID  string                 `json:"parentRevisionId,omitempty"`
 	CreatedAt         time.Time              `json:"createdAt"`
+	CreatedAtLocal    string                 `json:"createdAtLocal,omitempty"`
 	CreatedByDeviceID string                 `json:"createdByDeviceId"`
 	Database          VaultObjectDescriptor  `json:"database"`
 	Attachments       []AttachmentDescriptor `json:"attachments"`
@@ -167,6 +169,7 @@ type VaultJournalMetadata struct {
 	CloudJournalID string    `json:"cloudJournalId"`
 	DisplayName    string    `json:"displayName"`
 	UpdatedAt      time.Time `json:"updatedAt"`
+	UpdatedAtLocal string    `json:"updatedAtLocal,omitempty"`
 }
 
 func canonicalVaultJSON(value any) ([]byte, error) { return json.Marshal(value) }
@@ -182,6 +185,9 @@ func parseVaultCurrent(data []byte) (VaultCurrent, error) {
 		return v, fmt.Errorf("invalid current pointer format")
 	}
 	if err := validateCloudJournalID(v.CloudJournalID); err != nil {
+		return v, err
+	}
+	if err := validateVaultLocalDisplayTime(v.UpdatedAtLocal); err != nil {
 		return v, err
 	}
 	key, err := vaultManifestKey(v.CloudJournalID, v.RevisionID)
@@ -205,6 +211,9 @@ func parseVaultManifest(data []byte) (VaultRevisionManifest, error) {
 		return v, fmt.Errorf("invalid revision manifest")
 	}
 	if err := validateCloudJournalID(v.CloudJournalID); err != nil {
+		return v, err
+	}
+	if err := validateVaultLocalDisplayTime(v.CreatedAtLocal); err != nil {
 		return v, err
 	}
 	key, err := vaultDatabaseKey(v.CloudJournalID, v.RevisionID)
@@ -251,7 +260,25 @@ func parseVaultJournalMetadata(data []byte) (VaultJournalMetadata, error) {
 	if err := validateCloudJournalID(metadata.CloudJournalID); err != nil {
 		return metadata, err
 	}
+	if err := validateVaultLocalDisplayTime(metadata.UpdatedAtLocal); err != nil {
+		return metadata, err
+	}
 	return metadata, nil
+}
+
+func vaultLocalDisplayTime(value time.Time) string {
+	return value.In(time.Local).Format(time.RFC3339Nano)
+}
+
+func validateVaultLocalDisplayTime(value string) error {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil // Metadata written before this display field remains valid.
+	}
+	if _, err := time.Parse(time.RFC3339Nano, value); err != nil {
+		return fmt.Errorf("invalid Vault local display timestamp")
+	}
+	return nil
 }
 
 func newVaultRevisionID(now time.Time) (string, error) {

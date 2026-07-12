@@ -157,6 +157,13 @@ func TestVaultRevisionIDAndJournalMetadataAreReadable(t *testing.T) {
 	if err != nil || metadata.DisplayName != "Cloud Journal" || metadata.CloudJournalID != cloudJournalID {
 		t.Fatalf("unexpected initial journal metadata: %#v / %v", metadata, err)
 	}
+	if metadata.UpdatedAtLocal == "" || validateVaultLocalDisplayTime(metadata.UpdatedAtLocal) != nil {
+		t.Fatalf("expected a valid local metadata timestamp, got %#v", metadata)
+	}
+	current, _, err := sync.readCurrent(ctx, cloudJournalID)
+	if err != nil || current.UpdatedAtLocal == "" || validateVaultLocalDisplayTime(current.UpdatedAtLocal) != nil {
+		t.Fatalf("expected a valid local current timestamp, got %#v / %v", current, err)
+	}
 	if _, err := cache.RenameItem(cloudJournalID, "Project Atlas"); err != nil {
 		t.Fatalf("rename cloud Journal: %v", err)
 	}

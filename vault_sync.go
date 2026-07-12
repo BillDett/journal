@@ -146,7 +146,7 @@ func (s *VaultSyncService) publish(ctx context.Context, cache *JournalService, i
 		revisionNumber = current.RevisionNumber + 1
 		parent = current.RevisionID
 	}
-	manifest := VaultRevisionManifest{Format: vaultRevisionFormat, FormatVersion: vaultFormatVersion, CloudJournalID: id, RevisionID: revisionID, RevisionNumber: revisionNumber, ParentRevisionID: parent, CreatedAt: publishedAt, CreatedByDeviceID: s.Device.ID, Database: VaultObjectDescriptor{Key: db.Key, SHA256: db.Digest, Size: db.Size}, Attachments: attachments}
+	manifest := VaultRevisionManifest{Format: vaultRevisionFormat, FormatVersion: vaultFormatVersion, CloudJournalID: id, RevisionID: revisionID, RevisionNumber: revisionNumber, ParentRevisionID: parent, CreatedAt: publishedAt, CreatedAtLocal: vaultLocalDisplayTime(publishedAt), CreatedByDeviceID: s.Device.ID, Database: VaultObjectDescriptor{Key: db.Key, SHA256: db.Digest, Size: db.Size}, Attachments: attachments}
 	manifest.Encryption.Enabled = cacheHasPortableEncryption(cache)
 	if manifest.Encryption.Enabled {
 		manifest.Encryption.MetadataVersion = cloudPortableEncryptionFormatVersion
@@ -166,7 +166,7 @@ func (s *VaultSyncService) publish(ctx context.Context, cache *JournalService, i
 	if err := s.UpdateJournalMetadata(ctx, id, displayName); err != nil {
 		return err
 	}
-	next := VaultCurrent{Format: vaultCurrentFormat, FormatVersion: vaultFormatVersion, CloudJournalID: id, RevisionID: revisionID, RevisionNumber: revisionNumber, RevisionManifest: manifestDescriptor, UpdatedAt: publishedAt, PreviousRevisionID: parent}
+	next := VaultCurrent{Format: vaultCurrentFormat, FormatVersion: vaultFormatVersion, CloudJournalID: id, RevisionID: revisionID, RevisionNumber: revisionNumber, RevisionManifest: manifestDescriptor, UpdatedAt: publishedAt, UpdatedAtLocal: vaultLocalDisplayTime(publishedAt), PreviousRevisionID: parent}
 	next.PortableEncryption.Enabled = manifest.Encryption.Enabled
 	next.PortableEncryption.MetadataVersion = manifest.Encryption.MetadataVersion
 	control, err := canonicalVaultJSON(next)
@@ -200,7 +200,8 @@ func (s *VaultSyncService) UpdateJournalMetadata(ctx context.Context, cloudJourn
 	if displayName == "" || len(displayName) > 512 {
 		return fmt.Errorf("invalid journal display name")
 	}
-	metadata := VaultJournalMetadata{Format: vaultMetadataFormat, FormatVersion: vaultFormatVersion, CloudJournalID: cloudJournalID, DisplayName: displayName, UpdatedAt: s.now()}
+	updatedAt := s.now()
+	metadata := VaultJournalMetadata{Format: vaultMetadataFormat, FormatVersion: vaultFormatVersion, CloudJournalID: cloudJournalID, DisplayName: displayName, UpdatedAt: updatedAt, UpdatedAtLocal: vaultLocalDisplayTime(updatedAt)}
 	encoded, err := canonicalVaultJSON(metadata)
 	if err != nil {
 		return err
