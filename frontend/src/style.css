@@ -943,7 +943,7 @@ body.is-resizing-table * {
 .editor-status {
   height: 38px;
   display: grid;
-  grid-template-columns: minmax(120px, 1fr) auto minmax(90px, 1fr);
+  grid-template-columns: 118px max-content minmax(0, 1fr) max-content;
   align-items: center;
   gap: 14px;
   padding: 0 28px;
@@ -953,12 +953,23 @@ body.is-resizing-table * {
   background: rgba(251, 251, 252, 0.82);
 }
 
+.cloud-sync-button { display: inline-flex; align-items: center; gap: 6px; border: 0; background: transparent; color: var(--muted); padding: 0; font: inherit; font-weight: 700; white-space: nowrap; cursor: pointer; }
+.cloud-sync-button.clean { color: #0b6258; }
+.cloud-sync-button.dirty { color: #93580b; }
+.cloud-sync-button.conflict, .cloud-sync-button.locked_read_only, .cloud-sync-button.provider_missing { color: #a33b32; }
+.cloud-sync-button:disabled { color: var(--quiet); cursor: default; }
+.cloud-tree-state { width: 7px; height: 7px; margin-left: 5px; border-radius: 50%; background: var(--quiet); flex: 0 0 auto; }
+.cloud-tree-state.clean { background: #218779; }
+.cloud-tree-state.dirty { background: #c57913; }
+.cloud-tree-state.conflict, .cloud-tree-state.locked_read_only, .cloud-tree-state.provider_missing { background: #bd4b42; }
+
 .document-dates {
   display: inline-flex;
   align-items: center;
   gap: 14px;
   color: var(--quiet);
   white-space: nowrap;
+  justify-self: end;
 }
 
 .word-count {
@@ -1051,6 +1062,52 @@ body.is-resizing-table * {
   color: var(--muted);
   font-size: 13px;
   line-height: 1.45;
+}
+
+.settings-page {
+  height: 100%;
+  overflow: auto;
+  background: var(--paper);
+  padding: 48px clamp(32px, 7vw, 104px) 72px;
+}
+
+.settings-page-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 24px;
+  max-width: 900px;
+  margin: 0 auto 48px;
+  padding-bottom: 28px;
+  border-bottom: 1px solid var(--paper-edge);
+}
+
+.settings-page-header span { color: var(--accent); font-size: 12px; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; }
+.settings-page-header h1 { margin: 6px 0 8px; font-size: 38px; font-weight: 500; }
+.settings-page-header p { margin: 0; color: var(--muted); }
+.settings-page-body { max-width: 900px; margin: 0 auto; }
+.settings-section { display: grid; grid-template-columns: minmax(190px, .72fr) minmax(0, 1.5fr); gap: 44px; padding: 30px 0; border-bottom: 1px solid var(--paper-edge); }
+.settings-section-title h2 { margin: 0 0 7px; font-size: 16px; }
+.settings-section-title p, .settings-empty { margin: 0; color: var(--muted); font-size: 13px; line-height: 1.5; }
+.settings-control, .provider-row, .recovery-row { min-height: 54px; display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.settings-control small, .provider-row small { display: block; margin-top: 4px; color: var(--muted); }
+.settings-control input, .provider-form input, .provider-form select, .recovery-row input { height: 34px; width: 118px; border: 1px solid var(--line-strong); border-radius: 6px; background: #fff; padding: 0 9px; }
+.settings-control span { margin-left: 7px; color: var(--muted); font-size: 13px; }
+.provider-list { border-top: 1px solid var(--line); }
+.provider-row { padding: 13px 0; border-bottom: 1px solid var(--line); }
+.provider-status { color: #0b6258; background: var(--accent-soft); border-radius: 999px; padding: 5px 9px; font-size: 12px; font-weight: 700; }
+.provider-form { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin-top: 18px; align-items: end; }
+.provider-form label { display: grid; gap: 6px; color: var(--muted); font-size: 12px; font-weight: 700; }
+.provider-form input, .provider-form select, .recovery-row input { width: 100%; }
+.provider-form button { justify-self: start; }
+.provider-remove { flex: 0 0 auto; }
+.provider-help { margin: 12px 0 0; color: var(--muted); font-size: 12px; line-height: 1.45; }
+.recovery-row input { flex: 1; }
+
+@media (max-width: 760px) {
+  .settings-page { padding: 28px 24px 48px; }
+  .settings-section { grid-template-columns: 1fr; gap: 18px; }
+  .provider-form { grid-template-columns: 1fr; }
 }
 
 .encryption-dialog {

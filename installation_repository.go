@@ -122,9 +122,19 @@ func (r *InstallationRepository) UpsertProvider(p VaultProviderRecord) (VaultPro
 	}
 	p.Name = strings.TrimSpace(p.Name)
 	p.Kind = strings.TrimSpace(p.Kind)
+	p.Endpoint = strings.TrimSpace(p.Endpoint)
 	p.RootPrefix = strings.TrimSpace(p.RootPrefix)
-	if p.Name == "" || p.Kind != "filesystem" || p.RootPrefix == "" {
-		return VaultProviderRecord{}, fmt.Errorf("provider name and filesystem root are required")
+	if p.Name == "" || p.RootPrefix == "" {
+		return VaultProviderRecord{}, fmt.Errorf("provider name and vault location are required")
+	}
+	switch p.Kind {
+	case "filesystem":
+	case "s3", "webdav":
+		if p.Endpoint == "" {
+			return VaultProviderRecord{}, fmt.Errorf("provider endpoint is required")
+		}
+	default:
+		return VaultProviderRecord{}, fmt.Errorf("unsupported vault provider type %q", p.Kind)
 	}
 	if p.PublishDebounceMS <= 0 {
 		p.PublishDebounceMS = 30000
@@ -136,7 +146,7 @@ func (r *InstallationRepository) UpsertProvider(p VaultProviderRecord) (VaultPro
 		p.RevisionRetentionCount = 50
 	}
 	now := nowString()
-	_, err := r.db.Exec(`INSERT INTO vault_providers (id,name,kind,endpoint,root_prefix,credential_ref,publish_debounce_ms,publish_max_interval_ms,revision_retention_count,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,kind=excluded.kind,endpoint=excluded.endpoint,root_prefix=excluded.root_prefix,credential_ref=excluded.credential_ref,publish_debounce_ms=excluded.publish_debounce_ms,publish_max_interval_ms=excluded.publish_max_interval_ms,revision_retention_count=excluded.revision_retention_count,updated_at=excluded.updated_at`, p.ID, p.Name, p.Kind, "", p.RootPrefix, p.CredentialRef, p.PublishDebounceMS, p.PublishMaxIntervalMS, p.RevisionRetentionCount, now, now)
+	_, err := r.db.Exec(`INSERT INTO vault_providers (id,name,kind,endpoint,root_prefix,credential_ref,publish_debounce_ms,publish_max_interval_ms,revision_retention_count,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,kind=excluded.kind,endpoint=excluded.endpoint,root_prefix=excluded.root_prefix,credential_ref=excluded.credential_ref,publish_debounce_ms=excluded.publish_debounce_ms,publish_max_interval_ms=excluded.publish_max_interval_ms,revision_retention_count=excluded.revision_retention_count,updated_at=excluded.updated_at`, p.ID, p.Name, p.Kind, p.Endpoint, p.RootPrefix, p.CredentialRef, p.PublishDebounceMS, p.PublishMaxIntervalMS, p.RevisionRetentionCount, now, now)
 	if err != nil {
 		return VaultProviderRecord{}, err
 	}
@@ -164,6 +174,29 @@ func (r *InstallationRepository) ListMounts() ([]CloudJournalMountRecord, error)
 	return out, rows.Err()
 }
 
+func (r *InstallationRepository) SetMountSyncStatus(cloudJournalID, syncStatus, lastError string) error {
+	cloudJournalID = strings.TrimSpace(cloudJournalID)
+	syncStatus = strings.TrimSpace(syncStatus)
+	if err := validateCloudJournalID(cloudJournalID); err != nil {
+		return err
+	}
+	if syncStatus == "" {
+		return fmt.Errorf("sync status is required")
+	}
+	result, err := r.db.Exec(`UPDATE cloud_journal_mounts SET sync_status = ?, last_sync_error = ?, updated_at = ? WHERE cloud_journal_id = ?`, syncStatus, strings.TrimSpace(lastError), nowString(), cloudJournalID)
+	if err != nil {
+		return err
+	}
+	changed, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if changed == 0 {
+		return fmt.Errorf("cache_missing")
+	}
+	return nil
+}
+
 func (r *InstallationRepository) UpsertPendingCreate(record CloudPendingCreateRecord) error {
 	if err := validateCloudJournalID(record.CloudJournalID); err != nil {
 		return err
@@ -180,7 +213,7 @@ func (r *InstallationRepository) UpsertPendingCreate(record CloudPendingCreateRe
 	return err
 }
 
-func (r *InstallationRepository) RemoveProvider(providerID string, hasUnsyncedWork func(CloudJournalMountRecord) bool) error {
+func (r *InstallationRepository) RemoveProvider(providerID string, _ func(CloudJournalMountRecord) bool) error {
 	providerID = strings.TrimSpace(providerID)
 	if providerID == "" {
 		return fmt.Errorf("provider ID is required")
@@ -199,9 +232,6 @@ func (r *InstallationRepository) RemoveProvider(providerID string, hasUnsyncedWo
 			&mount.LastCurrentToken, &mount.LeaseID, &mount.RevisionRetentionCount, &mount.SyncStatus, &mount.LastSyncError,
 			&mount.LastSyncedAt, &mount.CreatedAt, &mount.UpdatedAt); err != nil {
 			return err
-		}
-		if hasUnsyncedWork != nil && hasUnsyncedWork(mount) {
-			return fmt.Errorf("cannot remove provider with unsynced cloud cache")
 		}
 		mounts = append(mounts, mount)
 	}

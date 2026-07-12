@@ -8,6 +8,7 @@ import {
   Bold,
   BookOpenText,
   BookPlus,
+	Cloud,
   CheckSquare,
   ChevronDown,
   ChevronRight,
@@ -121,9 +122,14 @@ function App() {
   })
   const [libraryWidth, setLibraryWidth] = useState(libraryWidthDefault)
   const [providers, setProviders] = useState<VaultProviderResponse[]>([])
-  const [providerName, setProviderName] = useState('Local Vault')
+  const [providerKind, setProviderKind] = useState<'s3' | 'webdav'>('s3')
+  const [providerName, setProviderName] = useState('S3 Vault')
+  const [providerEndpoint, setProviderEndpoint] = useState('')
   const [providerRoot, setProviderRoot] = useState('')
+  const [providerCredentialRef, setProviderCredentialRef] = useState('')
   const [cloudJournalID, setCloudJournalID] = useState('')
+  const [newJournalDialogOpen, setNewJournalDialogOpen] = useState(false)
+  const [cloudSyncing, setCloudSyncing] = useState(false)
   const autosaveTimer = useRef<number | undefined>(undefined)
   const operationCoordinator = useRef(new OperationCoordinator())
   const selectedJournalIdRef = useRef('')
@@ -138,6 +144,12 @@ function App() {
   const draggedItem = draggedId ? flattened.find((item) => item.id === draggedId) : undefined
   const selectedItem = selectedItemId ? flattened.find((item) => item.id === selectedItemId) ?? null : null
   const selectedJournal = selectedItem?.kind === 'journal' ? selectedItem : null
+  const activeCloudJournal = useMemo(() => {
+    if (!activeDoc) return null
+    const journalID = journalIdFor(flattened, activeDoc.id)
+    const journal = flattened.find((item) => item.id === journalID)
+    return journal?.storageKind === 'cloud' ? journal : null
+  }, [activeDoc?.id, flattened])
   const creationParentId = useMemo(
     () => creationParentFor(flattened, selectedItemId, defaultJournalId, trashId),
     [defaultJournalId, flattened, selectedItemId, trashId],
@@ -248,16 +260,14 @@ function App() {
     return () => window.clearTimeout(handle)
   }, [applyTree, loadTree, searchQuery])
 
-  async function refreshVisibleTree(fallbackItems?: TreeItem[], fallbackTrashId?: string) {
+  async function refreshVisibleTree(_fallbackItems?: TreeItem[], _fallbackTrashId?: string) {
     const requestVersion = operationCoordinator.current.nextTreeRequest()
     const query = searchQuery.trim()
     if (!query) {
-      if (fallbackItems && fallbackTrashId) {
-        if (operationCoordinator.current.isCurrentTreeRequest(requestVersion)) applyTree(fallbackItems, fallbackTrashId)
-      } else {
-        const response = await api.GetLibraryTree()
-        if (operationCoordinator.current.isCurrentTreeRequest(requestVersion)) applyTree(response.items, response.trashId)
-      }
+	  // Individual store operations can return a cache-local tree. Refresh from
+	  // the aggregate endpoint so a cloud mutation never replaces local Journals.
+      const response = await api.GetLibraryTree()
+      if (operationCoordinator.current.isCurrentTreeRequest(requestVersion)) applyTree(response.items, response.trashId)
       return
     }
 
@@ -454,7 +464,7 @@ function App() {
     }
   }
 
-  async function createJournal() {
+  async function createLocalJournal() {
     try {
       const response = await api.CreateJournal('New Journal')
       await refreshVisibleTree(response.tree.items, response.tree.trashId)
@@ -467,20 +477,28 @@ function App() {
     }
   }
 
-  async function saveFilesystemProvider() {
+  async function saveVaultProvider() {
     try {
-      const provider = await api.SaveVaultProvider({id: '', name: providerName, kind: 'filesystem', root: providerRoot, credentialRef: '', publishDebounceMs: 30000, publishMaxIntervalMs: 300000, revisionRetentionCount: 50})
-      await api.ValidateVaultProvider(provider.id)
+      await api.SaveVaultProvider({id: '', name: providerName, kind: providerKind, endpoint: providerEndpoint, root: providerRoot, credentialRef: providerCredentialRef, publishDebounceMs: 30000, publishMaxIntervalMs: 300000, revisionRetentionCount: 50})
       setProviders(await api.ListVaultProviders())
-      setStatus('Vault provider validated')
+      setProviderEndpoint('')
+      setProviderRoot('')
+      setProviderCredentialRef('')
+      setStatus('Vault provider saved')
+    } catch (error) { setLastError(messageFromError(error)) }
+  }
+
+  async function removeVaultProvider(provider: VaultProviderResponse) {
+    try {
+      await api.RemoveVaultProvider(provider.id)
+      setProviders(await api.ListVaultProviders())
+      setStatus(`Removed ${provider.name}`)
     } catch (error) { setLastError(messageFromError(error)) }
   }
 
   async function createCloudJournal() {
-    const provider = providers[0]
-    if (!provider) { setSettingsOpen(true); setLastError('Add and validate a Vault provider first.'); return }
     try {
-      const response = await api.CreateCloudJournal(provider.id)
+      const response = await api.CreateLocalCloudJournal()
       await refreshVisibleTree(response.tree.items, response.tree.trashId)
       setSelectedItemId(response.cloudJournalId)
       setExpanded((current) => new Set([...current, response.cloudJournalId]))
@@ -499,10 +517,21 @@ function App() {
     } catch (error) { setLastError(messageFromError(error)) }
   }
 
-  async function syncSelectedCloudJournal() {
-    const journal = selectedJournal
-    if (!journal || journal.storageKind !== 'cloud') return
-    try { const mount = await api.SyncCloudJournal(journal.id); await loadTree(); setStatus(mount.readOnly ? 'Cloud Journal is read-only' : 'Cloud Journal synced') } catch (error) { setLastError(messageFromError(error)) }
+  async function syncActiveCloudJournal() {
+    const journal = activeCloudJournal
+    if (!journal || journal.cloudStatus !== 'dirty' || cloudSyncing) return
+    if (!(await flushActive())) return
+    setCloudSyncing(true)
+    setStatus('Publishing to Vault')
+    try {
+      const mount = await api.SyncCloudJournal(journal.id)
+      await loadTree()
+      setStatus(mount.readOnly ? 'Cloud Journal is read-only' : 'Cloud Journal synced')
+    } catch (error) {
+      setLastError(messageFromError(error))
+    } finally {
+      setCloudSyncing(false)
+    }
   }
 
   async function exportJournalById(journalId: string) {
@@ -818,11 +847,10 @@ function App() {
         >
           <div className="library-head">
             <div className="mini-actions">
-              <button type="button" onClick={() => void createJournal()} disabled={creationDisabled} title="New journal"><BookPlus size={15}/></button>
-              <button type="button" onClick={() => void createCloudJournal()} disabled={creationDisabled} title="New cloud journal"><BookPlus size={15}/></button>
+              <button type="button" onClick={() => setNewJournalDialogOpen(true)} disabled={creationDisabled} title="New journal"><BookPlus size={15}/></button>
               <button type="button" onClick={() => void createDocument(creationParentId)} disabled={creationDisabled} title="New document"><FilePlus size={15}/></button>
               <button type="button" onClick={() => void createFolder(creationParentId)} disabled={creationDisabled} title="New folder"><FolderPlus size={15}/></button>
-              <button type="button" className={settingsOpen ? 'icon-button active' : 'icon-button'} onClick={() => setSettingsOpen((value) => !value)} title="Autosave settings"><Settings size={15}/></button>
+              <button type="button" className={settingsOpen ? 'icon-button active' : 'icon-button'} onClick={() => setSettingsOpen((value) => !value)} title="Settings"><Settings size={15}/></button>
             </div>
           </div>
 
@@ -847,7 +875,7 @@ function App() {
             ) : tree.length === 0 ? (
               <div className="empty-library">
                 <p>No journals yet.</p>
-                <button type="button" onClick={() => void createJournal()} disabled={creationDisabled}>Create journal</button>
+                <button type="button" onClick={() => setNewJournalDialogOpen(true)} disabled={creationDisabled}>Create journal</button>
               </div>
             ) : (
               tree.map((item) => (
@@ -910,50 +938,46 @@ function App() {
         />
 
         <section className="document-workspace">
-          {settingsOpen && (
-            <div className="settings-strip">
-              <label>
-                Autosave interval
-                <input
-                  type="number"
-                  min={500}
-                  step={250}
-                  value={autosaveInterval}
-                  onChange={(event) => void updateAutosaveInterval(Number(event.target.value))}
-                />
-                <span>ms</span>
-              </label>
-              {encryptionStatus.masterPasswordConfigured && (
-                <button type="button" onClick={() => setEncryptionDialog({mode: 'change'})}><KeyRound size={14}/>Change master password</button>
-              )}
-              <label>
-                Vault name
-                <input value={providerName} onChange={(event) => setProviderName(event.target.value)} placeholder="Local Vault" />
-              </label>
-              <label>
-                Vault folder
-                <input value={providerRoot} onChange={(event) => setProviderRoot(event.target.value)} placeholder="/path/to/vault" />
-              </label>
-              <button type="button" onClick={() => void saveFilesystemProvider()}>Add local Vault provider</button>
-              <label>
-                Reconnect cloud Journal ID
-                <input value={cloudJournalID} onChange={(event) => setCloudJournalID(event.target.value)} placeholder="Journal UUID" />
-              </label>
-              <button type="button" onClick={() => void reconnectCloudJournal()} disabled={!providers.length || !cloudJournalID.trim()}>Reconnect</button>
-              {selectedJournal?.storageKind === 'cloud' && <button type="button" onClick={() => void syncSelectedCloudJournal()} disabled={selectedJournal.readOnly}>Sync now</button>}
-            </div>
-          )}
-
-          {activeDoc ? (
+          {settingsOpen ? (
+            <SettingsPage
+              autosaveInterval={autosaveInterval}
+              encryptionConfigured={encryptionStatus.masterPasswordConfigured}
+              providers={providers}
+              providerKind={providerKind}
+              providerName={providerName}
+              providerEndpoint={providerEndpoint}
+              providerRoot={providerRoot}
+              providerCredentialRef={providerCredentialRef}
+              cloudJournalID={cloudJournalID}
+              onClose={() => setSettingsOpen(false)}
+              onAutosaveChange={(value) => void updateAutosaveInterval(value)}
+              onChangePassword={() => setEncryptionDialog({mode: 'change'})}
+              onProviderKindChange={(kind) => {
+                setProviderKind(kind)
+                if (providerName === 'S3 Vault' || providerName === 'WebDAV Vault') setProviderName(kind === 's3' ? 'S3 Vault' : 'WebDAV Vault')
+              }}
+              onProviderNameChange={setProviderName}
+              onProviderEndpointChange={setProviderEndpoint}
+              onProviderRootChange={setProviderRoot}
+              onProviderCredentialRefChange={setProviderCredentialRef}
+              onSaveProvider={() => void saveVaultProvider()}
+              onRemoveProvider={(provider) => void removeVaultProvider(provider)}
+              onReconnectIDChange={setCloudJournalID}
+              onReconnect={() => void reconnectCloudJournal()}
+            />
+          ) : activeDoc ? (
             <EditorPane
               key={activeDoc.id}
               document={activeDoc}
               focusTitle={titleFocusDocumentId === activeDoc.id}
               saveState={saveState}
               status={status}
+              cloudStatus={activeCloudJournal?.cloudStatus ?? ''}
+              cloudSyncing={cloudSyncing}
               onDraft={updateActiveDraft}
               onSpacingPresetChange={(spacingPreset) => void updateActiveSpacing(spacingPreset)}
               onFlush={() => void flushActive()}
+              onSyncCloud={() => void syncActiveCloudJournal()}
               onError={setLastError}
               onRename={(title) => void renameItem(activeDoc.id, title)}
               onTitleFocused={() => setTitleFocusDocumentId('')}
@@ -977,6 +1001,14 @@ function App() {
               <span>{lastError}</span>
               <button type="button" onClick={() => setLastError('')} title="Dismiss"><X size={14}/></button>
             </div>
+          )}
+
+          {newJournalDialogOpen && (
+            <NewJournalDialog
+              onCancel={() => setNewJournalDialogOpen(false)}
+              onCreateLocal={() => { setNewJournalDialogOpen(false); void createLocalJournal() }}
+              onCreateCloud={() => { setNewJournalDialogOpen(false); void createCloudJournal() }}
+            />
           )}
 
           {deleteTarget && (
@@ -1035,16 +1067,19 @@ type EditorPaneProps = {
   focusTitle?: boolean
   saveState: SaveState
   status: string
+  cloudStatus: string
+  cloudSyncing: boolean
   onDraft: (content: ProseMirrorDoc) => Promise<void>
   onSpacingPresetChange: (spacingPreset: SpacingPreset) => void
   onFlush: () => void
+  onSyncCloud: () => void
   onError: (message: string) => void
   onRename: (title: string) => void
   onTitleFocused?: () => void
   onEditorReady: (editor: Editor) => void
 }
 
-function EditorPane({document, focusTitle = false, saveState, status, onDraft, onSpacingPresetChange, onFlush, onError, onRename, onTitleFocused, onEditorReady}: EditorPaneProps) {
+function EditorPane({document, focusTitle = false, saveState, status, cloudStatus, cloudSyncing, onDraft, onSpacingPresetChange, onFlush, onSyncCloud, onError, onRename, onTitleFocused, onEditorReady}: EditorPaneProps) {
   const [title, setTitle] = useState(document.title)
   const [linkPopover, setLinkPopover] = useState<LinkPopoverState | null>(null)
   const [canCreateLink, setCanCreateLink] = useState(false)
@@ -1326,6 +1361,7 @@ function EditorPane({document, focusTitle = false, saveState, status, onDraft, o
       ) : null}
       <footer className="editor-status">
         <SaveIndicator state={saveState} label={status}/>
+        {cloudStatus ? <CloudSyncIndicator status={cloudStatus} syncing={cloudSyncing} onSync={onSyncCloud}/> : <span aria-hidden="true"/>}
         <span className="document-dates">
           <span>Created {formatTimestamp(document.createdAt)}</span>
           <span>Updated {formatTimestamp(document.updatedAt)}</span>
@@ -1683,6 +1719,7 @@ function TreeNode(props: TreeNodeProps) {
   const isExpanded = expanded.has(item.id)
   const isTrash = item.id === trashId
   const isEncryptedJournal = isJournal && item.encryptionState === 'encrypted'
+  const isCloudJournal = isJournal && item.storageKind === 'cloud'
   const isLockedJournal = isEncryptedJournal && item.encryptionLocked
   const isReadOnly = item.readOnly
   const deleteDisabled = isJournal && journalCount <= 1
@@ -1739,7 +1776,8 @@ function TreeNode(props: TreeNodeProps) {
         }} title={isExpanded ? 'Collapse' : 'Expand'}>
           {isContainer ? (isExpanded ? <ChevronDown size={15}/> : <ChevronRight size={15}/>) : <span/>}
         </button>
-        {isTrash ? <Trash2 size={16}/> : isEncryptedJournal ? <Lock size={16}/> : isJournal ? <BookOpenText size={16}/> : isFolder ? <Folder size={16}/> : <FileText size={16}/>}
+        {isTrash ? <Trash2 size={16}/> : isCloudJournal ? <Cloud size={16} aria-label="Cloud Journal"/> : isEncryptedJournal ? <Lock size={16}/> : isJournal ? <BookOpenText size={16}/> : isFolder ? <Folder size={16}/> : <FileText size={16}/>}
+		{isCloudJournal && <span className={`cloud-tree-state ${item.cloudStatus || 'unknown'}`} title={cloudSyncLabel(item.cloudStatus)} aria-label={cloudSyncLabel(item.cloudStatus)}/>}
 
         {renamingId === item.id ? (
           <input
@@ -1796,6 +1834,148 @@ function TreeNode(props: TreeNodeProps) {
       {isContainer && isExpanded && item.children.map((child) => (
         <TreeNode key={child.id} {...props} item={child} level={level + 1}/>
       ))}
+    </div>
+  )
+}
+
+function SettingsPage({
+  autosaveInterval, encryptionConfigured, providers, providerKind, providerName, providerEndpoint, providerRoot,
+  providerCredentialRef, cloudJournalID, onClose, onAutosaveChange, onChangePassword, onProviderKindChange,
+  onProviderNameChange, onProviderEndpointChange, onProviderRootChange, onProviderCredentialRefChange,
+  onSaveProvider, onRemoveProvider, onReconnectIDChange, onReconnect,
+}: {
+  autosaveInterval: number
+  encryptionConfigured: boolean
+  providers: VaultProviderResponse[]
+  providerKind: 's3' | 'webdav'
+  providerName: string
+  providerEndpoint: string
+  providerRoot: string
+  providerCredentialRef: string
+  cloudJournalID: string
+  onClose: () => void
+  onAutosaveChange: (value: number) => void
+  onChangePassword: () => void
+  onProviderKindChange: (value: 's3' | 'webdav') => void
+  onProviderNameChange: (value: string) => void
+  onProviderEndpointChange: (value: string) => void
+  onProviderRootChange: (value: string) => void
+  onProviderCredentialRefChange: (value: string) => void
+  onSaveProvider: () => void
+  onRemoveProvider: (provider: VaultProviderResponse) => void
+  onReconnectIDChange: (value: string) => void
+  onReconnect: () => void
+}) {
+  return (
+    <div className="settings-page" aria-label="Settings">
+      <header className="settings-page-header">
+        <div>
+          <span>Journal</span>
+          <h1>Settings</h1>
+          <p>Preferences, security, and cloud Vault connections.</p>
+        </div>
+        <button type="button" className="secondary" onClick={onClose}>Done</button>
+      </header>
+      <div className="settings-page-body">
+        <section className="settings-section">
+          <div className="settings-section-title">
+            <h2>Writing</h2>
+            <p>Save drafts locally before any cloud publication.</p>
+          </div>
+          <div className="settings-control">
+            <label htmlFor="autosave-interval">Autosave interval</label>
+            <div>
+              <input id="autosave-interval" type="number" min={500} step={250} value={autosaveInterval} onChange={(event) => onAutosaveChange(Number(event.target.value))}/>
+              <span>ms</span>
+            </div>
+          </div>
+        </section>
+        <section className="settings-section">
+          <div className="settings-section-title">
+            <h2>Security</h2>
+            <p>Encryption remains local until a Journal is explicitly encrypted.</p>
+          </div>
+          <div className="settings-control">
+            <div>
+              <strong>Master password</strong>
+              <small>{encryptionConfigured ? 'Configured for local Journals' : 'Not configured'}</small>
+            </div>
+            {encryptionConfigured && <button type="button" onClick={onChangePassword}><KeyRound size={14}/>Change password</button>}
+          </div>
+        </section>
+        <section className="settings-section">
+          <div className="settings-section-title">
+            <h2>Vault providers</h2>
+            <p>Providers define where Cloud Journals are stored. Removing one never deletes the remote Vault or its local cache.</p>
+          </div>
+          <div>
+            <div className="provider-list">
+              {providers.length ? providers.map((provider) => (
+                <div className="provider-row" key={provider.id}>
+                  <div>
+                    <strong>{provider.name}</strong>
+                    <small>{provider.kind === 's3' ? 'S3' : 'WebDAV'} · {provider.endpoint} · {provider.root}</small>
+                  </div>
+                  <button type="button" className="secondary provider-remove" onClick={() => onRemoveProvider(provider)}>Remove</button>
+                </div>
+              )) : <p className="settings-empty">No Vault providers configured.</p>}
+            </div>
+            <div className="provider-form">
+              <label>Provider type
+                <select value={providerKind} onChange={(event) => onProviderKindChange(event.target.value as 's3' | 'webdav')}>
+                  <option value="s3">S3 / S3-compatible</option>
+                  <option value="webdav">WebDAV</option>
+                </select>
+              </label>
+              <label>Provider name
+                <input value={providerName} onChange={(event) => onProviderNameChange(event.target.value)} placeholder={providerKind === 's3' ? 'S3 Vault' : 'WebDAV Vault'}/>
+              </label>
+              <label>{providerKind === 's3' ? 'Service endpoint' : 'Server URL'}
+                <input value={providerEndpoint} onChange={(event) => onProviderEndpointChange(event.target.value)} placeholder={providerKind === 's3' ? 'https://s3.example.com' : 'https://dav.example.com/vault'}/>
+              </label>
+              <label>{providerKind === 's3' ? 'Bucket and prefix' : 'Vault path'}
+                <input value={providerRoot} onChange={(event) => onProviderRootChange(event.target.value)} placeholder={providerKind === 's3' ? 'bucket-name/journal' : '/journal'}/>
+              </label>
+              <label>Credential reference
+                <input value={providerCredentialRef} onChange={(event) => onProviderCredentialRefChange(event.target.value)} placeholder="Secure-store reference"/>
+              </label>
+              <button type="button" onClick={onSaveProvider}>Save provider</button>
+            </div>
+            <p className="provider-help">Store credentials in the operating system’s secure store and enter their reference here; Journal never displays a saved reference.</p>
+          </div>
+        </section>
+        <section className="settings-section">
+          <div className="settings-section-title">
+            <h2>Recovery</h2>
+            <p>Reconnect an existing Cloud Journal with its Vault provider and Journal ID.</p>
+          </div>
+          <div className="recovery-row">
+            <input value={cloudJournalID} onChange={(event) => onReconnectIDChange(event.target.value)} placeholder="Cloud Journal ID"/>
+            <button type="button" disabled={!providers.length || !cloudJournalID.trim()} onClick={onReconnect}>Reconnect</button>
+          </div>
+        </section>
+      </div>
+    </div>
+  )
+}
+
+function NewJournalDialog({onCancel, onCreateLocal, onCreateCloud}: {
+  onCancel: () => void
+  onCreateLocal: () => void
+  onCreateCloud: () => void
+}) {
+  return (
+    <div className="dialog-backdrop" role="presentation" onMouseDown={onCancel}>
+      <section className="confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="new-journal-title" onMouseDown={(event) => event.stopPropagation()}>
+        <h2 id="new-journal-title">Create Journal</h2>
+        <p>Choose where this Journal will live. This choice cannot be changed later.</p>
+        <div className="confirm-actions">
+          <button type="button" onClick={onCreateLocal}>Local Journal</button>
+          <button type="button" onClick={onCreateCloud}>Cloud Journal (Local Vault)</button>
+          <button type="button" className="secondary" onClick={onCancel}>Cancel</button>
+        </div>
+        <p>Cloud Journals use the app-managed Local Vault for this testing workflow.</p>
+      </section>
     </div>
   )
 }
@@ -1977,6 +2157,28 @@ function SaveIndicator({state, label}: {state: SaveState, label: string}) {
       {label}
     </div>
   )
+}
+
+function CloudSyncIndicator({status, syncing, onSync}: {status: string, syncing: boolean, onSync: () => void}) {
+  const actionable = status === 'dirty'
+  const label = syncing ? 'Syncing…' : status === 'dirty' ? 'Sync changes' : cloudSyncLabel(status)
+  return (
+    <button type="button" className={`cloud-sync-button ${status || 'unknown'}`} onClick={onSync} disabled={!actionable || syncing}>
+      <Cloud size={13}/>
+      {label}
+    </button>
+  )
+}
+
+function cloudSyncLabel(status: string) {
+  switch (status) {
+    case 'clean': return 'Vault synced'
+    case 'dirty': return 'Changes awaiting sync'
+    case 'locked_read_only': return 'Read-only: lease held elsewhere'
+    case 'conflict': return 'Sync conflict'
+    case 'provider_missing': return 'Vault unavailable'
+    default: return 'Cloud status unavailable'
+  }
 }
 
 function orderTree(items: TreeItem[], trashId: string): TreeItem[] {

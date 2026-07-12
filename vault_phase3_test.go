@@ -131,6 +131,48 @@ func TestVaultSyncPublishConflictAndNewDeviceRecovery(t *testing.T) {
 	}
 }
 
+func TestVaultRevisionIDAndJournalMetadataAreReadable(t *testing.T) {
+	_, sync := newVaultSyncForTest(t, t.TempDir())
+	fixedNow := time.Date(2026, time.July, 11, 15, 45, 30, 123000000, time.UTC)
+	sync.Now = func() time.Time { return fixedNow }
+	ctx := context.Background()
+	cache, cloudJournalID, err := sync.CreateCloudJournal(ctx)
+	if err != nil {
+		t.Fatalf("create cloud Journal: %v", err)
+	}
+	mount, err := sync.mount(cloudJournalID)
+	if err != nil {
+		t.Fatalf("read cloud mount: %v", err)
+	}
+	wantPrefix := "rev-20260711T154530.123Z-"
+	if !strings.HasPrefix(mount.LastRevisionID, wantPrefix) || validateVaultRevisionID(mount.LastRevisionID) != nil {
+		t.Fatalf("expected readable timestamp UUID revision ID, got %q", mount.LastRevisionID)
+	}
+
+	metadataBytes, _, err := sync.Store.GetControl(ctx, sync.Provider, mustVaultJournalMetadata(cloudJournalID))
+	if err != nil {
+		t.Fatalf("read journal metadata: %v", err)
+	}
+	metadata, err := parseVaultJournalMetadata(metadataBytes)
+	if err != nil || metadata.DisplayName != "Cloud Journal" || metadata.CloudJournalID != cloudJournalID {
+		t.Fatalf("unexpected initial journal metadata: %#v / %v", metadata, err)
+	}
+	if _, err := cache.RenameItem(cloudJournalID, "Project Atlas"); err != nil {
+		t.Fatalf("rename cloud Journal: %v", err)
+	}
+	if err := sync.Publish(ctx, cache, cloudJournalID); err != nil {
+		t.Fatalf("publish renamed cloud Journal: %v", err)
+	}
+	metadataBytes, _, err = sync.Store.GetControl(ctx, sync.Provider, mustVaultJournalMetadata(cloudJournalID))
+	if err != nil {
+		t.Fatalf("read renamed journal metadata: %v", err)
+	}
+	metadata, err = parseVaultJournalMetadata(metadataBytes)
+	if err != nil || metadata.DisplayName != "Project Atlas" {
+		t.Fatalf("expected renamed journal metadata, got %#v / %v", metadata, err)
+	}
+}
+
 func TestVaultCodecValidationRejectsMalformedRecords(t *testing.T) {
 	id := uuid.NewString()
 	manifestKey, _ := vaultManifestKey(id, uuid.NewString())

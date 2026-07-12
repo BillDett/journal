@@ -10,13 +10,18 @@ import (
 	"io"
 	"strings"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 const (
 	vaultCurrentFormat  = "journal-vault-current"
 	vaultRevisionFormat = "journal-vault-revision"
 	vaultLeaseFormat    = "journal-vault-lease"
+	vaultMetadataFormat = "journal-vault-metadata"
 	vaultFormatVersion  = 1
+	vaultRevisionPrefix = "rev-"
+	vaultRevisionLayout = "20060102T150405.000Z"
 )
 
 type VaultProvider struct {
@@ -91,14 +96,17 @@ func vaultKey(cloudJournalID, suffix string) (string, error) {
 }
 func vaultCurrentKey(id string) (string, error) { return vaultKey(id, "current.json") }
 func vaultLeaseKey(id string) (string, error)   { return vaultKey(id, "lease.json") }
+func vaultJournalMetadataKey(id string) (string, error) {
+	return vaultKey(id, "journal.json")
+}
 func vaultManifestKey(id, revisionID string) (string, error) {
-	if err := validateCloudJournalID(revisionID); err != nil {
+	if err := validateVaultRevisionID(revisionID); err != nil {
 		return "", err
 	}
 	return vaultKey(id, "revisions/"+revisionID+"/manifest.json")
 }
 func vaultDatabaseKey(id, revisionID string) (string, error) {
-	if err := validateCloudJournalID(revisionID); err != nil {
+	if err := validateVaultRevisionID(revisionID); err != nil {
 		return "", err
 	}
 	return vaultKey(id, "revisions/"+revisionID+"/journal.db")
@@ -149,6 +157,16 @@ type VaultLease struct {
 	AcquiredAt          time.Time `json:"acquiredAt"`
 	ExpiresAt           time.Time `json:"expiresAt"`
 	CurrentPointerToken string    `json:"currentPointerToken"`
+}
+
+// VaultJournalMetadata is a public, advisory label for browsing a Vault. It
+// never controls recovery or data integrity; current.json remains authoritative.
+type VaultJournalMetadata struct {
+	Format         string    `json:"format"`
+	FormatVersion  int       `json:"formatVersion"`
+	CloudJournalID string    `json:"cloudJournalId"`
+	DisplayName    string    `json:"displayName"`
+	UpdatedAt      time.Time `json:"updatedAt"`
 }
 
 func canonicalVaultJSON(value any) ([]byte, error) { return json.Marshal(value) }
@@ -216,6 +234,54 @@ func parseVaultLease(data []byte) (VaultLease, error) {
 		return v, err
 	}
 	return v, nil
+}
+
+func parseVaultJournalMetadata(data []byte) (VaultJournalMetadata, error) {
+	var metadata VaultJournalMetadata
+	if len(data) > 1<<20 {
+		return metadata, fmt.Errorf("journal metadata too large")
+	}
+	if err := json.Unmarshal(data, &metadata); err != nil {
+		return metadata, err
+	}
+	metadata.DisplayName = strings.TrimSpace(metadata.DisplayName)
+	if metadata.Format != vaultMetadataFormat || metadata.FormatVersion != vaultFormatVersion || metadata.DisplayName == "" || len(metadata.DisplayName) > 512 || metadata.UpdatedAt.IsZero() {
+		return metadata, fmt.Errorf("invalid journal metadata")
+	}
+	if err := validateCloudJournalID(metadata.CloudJournalID); err != nil {
+		return metadata, err
+	}
+	return metadata, nil
+}
+
+func newVaultRevisionID(now time.Time) (string, error) {
+	id, err := uuid.NewV7()
+	if err != nil {
+		return "", err
+	}
+	return vaultRevisionPrefix + now.UTC().Format(vaultRevisionLayout) + "-" + id.String(), nil
+}
+
+func validateVaultRevisionID(revisionID string) error {
+	revisionID = strings.TrimSpace(revisionID)
+	// UUID-only revision IDs were emitted by earlier releases and must remain
+	// readable when a Vault is upgraded in place.
+	if parsed, err := uuid.Parse(revisionID); err == nil && parsed != uuid.Nil {
+		return nil
+	}
+	timestampLength := len(time.Now().UTC().Format(vaultRevisionLayout))
+	prefixLength := len(vaultRevisionPrefix)
+	if !strings.HasPrefix(revisionID, vaultRevisionPrefix) || len(revisionID) != prefixLength+timestampLength+1+36 || revisionID[prefixLength+timestampLength] != '-' {
+		return fmt.Errorf("invalid Vault revision ID")
+	}
+	if _, err := time.Parse(vaultRevisionLayout, revisionID[prefixLength:prefixLength+timestampLength]); err != nil {
+		return fmt.Errorf("invalid Vault revision timestamp")
+	}
+	parsed, err := uuid.Parse(revisionID[prefixLength+timestampLength+1:])
+	if err != nil || parsed == uuid.Nil || parsed.Version() != 7 {
+		return fmt.Errorf("invalid Vault revision UUID")
+	}
+	return nil
 }
 func validateVaultDescriptor(d VaultObjectDescriptor) error {
 	if err := validateSHA256Digest(d.SHA256); err != nil {

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -106,7 +107,11 @@ func (s *VaultSyncService) publish(ctx context.Context, cache *JournalService, i
 			return putErr
 		}
 	}
-	revisionID := uuid.Must(uuid.NewV7()).String()
+	publishedAt := s.now()
+	revisionID, err := newVaultRevisionID(publishedAt)
+	if err != nil {
+		return err
+	}
 	dbKey, err := vaultDatabaseKey(id, revisionID)
 	if err != nil {
 		return err
@@ -141,7 +146,7 @@ func (s *VaultSyncService) publish(ctx context.Context, cache *JournalService, i
 		revisionNumber = current.RevisionNumber + 1
 		parent = current.RevisionID
 	}
-	manifest := VaultRevisionManifest{Format: vaultRevisionFormat, FormatVersion: vaultFormatVersion, CloudJournalID: id, RevisionID: revisionID, RevisionNumber: revisionNumber, ParentRevisionID: parent, CreatedAt: s.now(), CreatedByDeviceID: s.Device.ID, Database: VaultObjectDescriptor{Key: db.Key, SHA256: db.Digest, Size: db.Size}, Attachments: attachments}
+	manifest := VaultRevisionManifest{Format: vaultRevisionFormat, FormatVersion: vaultFormatVersion, CloudJournalID: id, RevisionID: revisionID, RevisionNumber: revisionNumber, ParentRevisionID: parent, CreatedAt: publishedAt, CreatedByDeviceID: s.Device.ID, Database: VaultObjectDescriptor{Key: db.Key, SHA256: db.Digest, Size: db.Size}, Attachments: attachments}
 	manifest.Encryption.Enabled = cacheHasPortableEncryption(cache)
 	if manifest.Encryption.Enabled {
 		manifest.Encryption.MetadataVersion = cloudPortableEncryptionFormatVersion
@@ -154,7 +159,14 @@ func (s *VaultSyncService) publish(ctx context.Context, cache *JournalService, i
 	if _, err := s.Store.PutImmutable(ctx, s.Provider, manifestKey, bytesReader(bytes), manifestDescriptor.SHA256); err != nil {
 		return err
 	}
-	next := VaultCurrent{Format: vaultCurrentFormat, FormatVersion: vaultFormatVersion, CloudJournalID: id, RevisionID: revisionID, RevisionNumber: revisionNumber, RevisionManifest: manifestDescriptor, UpdatedAt: s.now(), PreviousRevisionID: parent}
+	displayName, err := cache.CloudJournalDisplayName(id)
+	if err != nil {
+		return err
+	}
+	if err := s.UpdateJournalMetadata(ctx, id, displayName); err != nil {
+		return err
+	}
+	next := VaultCurrent{Format: vaultCurrentFormat, FormatVersion: vaultFormatVersion, CloudJournalID: id, RevisionID: revisionID, RevisionNumber: revisionNumber, RevisionManifest: manifestDescriptor, UpdatedAt: publishedAt, PreviousRevisionID: parent}
 	next.PortableEncryption.Enabled = manifest.Encryption.Enabled
 	next.PortableEncryption.MetadataVersion = manifest.Encryption.MetadataVersion
 	control, err := canonicalVaultJSON(next)
@@ -173,11 +185,43 @@ func (s *VaultSyncService) publish(ctx context.Context, cache *JournalService, i
 	if err != nil || confirmed.RevisionID != revisionID {
 		return fmt.Errorf("digest_mismatch")
 	}
-	if err := s.upsertMount(CloudJournalMountRecord{CloudJournalID: id, ProviderID: s.Provider.ID, VaultRoot: s.Provider.Root, CachePath: cache.repository.path, LastRevisionID: revisionID, LastCurrentToken: confirmedToken, LeaseID: lease.LeaseID, SyncStatus: "clean", LastSyncedAt: s.now().Format(time.RFC3339Nano)}); err != nil {
+	if err := s.upsertMount(CloudJournalMountRecord{CloudJournalID: id, ProviderID: s.Provider.ID, VaultRoot: s.Provider.Root, CachePath: cache.repository.path, LastRevisionID: revisionID, LastCurrentToken: confirmedToken, LeaseID: lease.LeaseID, SyncStatus: "clean", LastSyncedAt: publishedAt.Format(time.RFC3339Nano)}); err != nil {
 		return err
 	}
 	_, _ = cache.db.Exec(`DELETE FROM cloud_pending_creates WHERE cloud_journal_id = ?`, id)
 	return nil
+}
+
+func (s *VaultSyncService) UpdateJournalMetadata(ctx context.Context, cloudJournalID, displayName string) error {
+	if err := validateCloudJournalID(cloudJournalID); err != nil {
+		return err
+	}
+	displayName = strings.TrimSpace(displayName)
+	if displayName == "" || len(displayName) > 512 {
+		return fmt.Errorf("invalid journal display name")
+	}
+	metadata := VaultJournalMetadata{Format: vaultMetadataFormat, FormatVersion: vaultFormatVersion, CloudJournalID: cloudJournalID, DisplayName: displayName, UpdatedAt: s.now()}
+	encoded, err := canonicalVaultJSON(metadata)
+	if err != nil {
+		return err
+	}
+	key, err := vaultJournalMetadataKey(cloudJournalID)
+	if err != nil {
+		return err
+	}
+	current, token, err := s.Store.GetControl(ctx, s.Provider, key)
+	if isVault(err, VaultNotFound) {
+		_, err = s.Store.CreateControlIfAbsent(ctx, s.Provider, key, encoded)
+		return err
+	}
+	if err != nil {
+		return err
+	}
+	if _, err := parseVaultJournalMetadata(current); err != nil {
+		return err
+	}
+	_, err = s.Store.PutControlIf(ctx, s.Provider, key, encoded, token)
+	return err
 }
 
 func (s *VaultSyncService) ReconnectCloudJournal(ctx context.Context, id string) (*JournalService, error) {
@@ -372,6 +416,10 @@ func (s *VaultSyncService) upsertMount(m CloudJournalMountRecord) error {
 }
 func mustVaultCurrent(id string) string { k, _ := vaultCurrentKey(id); return k }
 func mustVaultLease(id string) string   { k, _ := vaultLeaseKey(id); return k }
+func mustVaultJournalMetadata(id string) string {
+	k, _ := vaultJournalMetadataKey(id)
+	return k
+}
 func isVault(err error, kind VaultErrorKind) bool {
 	var target *VaultError
 	return errors.As(err, &target) && target.Kind == kind

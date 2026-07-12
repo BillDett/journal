@@ -37,6 +37,27 @@ func (m *CloudCacheManager) CacheDirectory(cloudJournalID string) (string, error
 	return filepath.Join(m.root, cloudJournalID), nil
 }
 
+// CloudJournalDisplayName returns the intentionally public title stored on a
+// cloud Journal root. Journal names remain readable even when its document
+// content is protected by portable encryption.
+func (s *JournalService) CloudJournalDisplayName(cloudJournalID string) (string, error) {
+	if err := validateCloudJournalID(cloudJournalID); err != nil {
+		return "", err
+	}
+	item, err := s.getRawRowItemFrom(s.db, cloudJournalID)
+	if err != nil {
+		return "", err
+	}
+	if item.Kind != KindJournal || item.ParentID.Valid {
+		return "", fmt.Errorf("cloud Journal root is missing")
+	}
+	title := strings.TrimSpace(item.Title)
+	if title == "" || len(title) > 512 {
+		return "", fmt.Errorf("invalid cloud Journal title")
+	}
+	return title, nil
+}
+
 func (m *CloudCacheManager) CachePath(cloudJournalID string) (string, error) {
 	directory, err := m.CacheDirectory(cloudJournalID)
 	if err != nil {

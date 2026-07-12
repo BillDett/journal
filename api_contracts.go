@@ -105,6 +105,7 @@ type VaultProviderRequest struct {
 	ID                     string `json:"id"`
 	Name                   string `json:"name"`
 	Kind                   string `json:"kind"`
+	Endpoint               string `json:"endpoint"`
 	Root                   string `json:"root"`
 	CredentialRef          string `json:"credentialRef"`
 	PublishDebounceMS      int    `json:"publishDebounceMs"`
@@ -116,6 +117,7 @@ type VaultProviderResponse struct {
 	ID                     string `json:"id"`
 	Name                   string `json:"name"`
 	Kind                   string `json:"kind"`
+	Endpoint               string `json:"endpoint"`
 	Root                   string `json:"root"`
 	PublishDebounceMS      int    `json:"publishDebounceMs"`
 	PublishMaxIntervalMS   int    `json:"publishMaxIntervalMs"`

@@ -31,16 +31,34 @@ func (s *CloudJournalStore) EnsureWritable(ctx context.Context) error {
 	if mount.SyncStatus == "conflict" {
 		return fmt.Errorf("current_pointer_conflict")
 	}
-	if mount.SyncStatus == "locked_read_only" || mount.SyncStatus == "provider_missing" {
+	if mount.SyncStatus == "provider_missing" {
 		return fmt.Errorf("lease_lost")
 	}
-	data, _, err := s.Sync.Store.GetControl(ctx, s.Sync.Provider, mustVaultLease(s.CloudJournalID))
+
+	lease, err := s.ensureLease(ctx, mount)
 	if err != nil {
 		return fmt.Errorf("lease_lost: %w", err)
 	}
-	lease, err := parseVaultLease(data)
-	if err != nil || lease.OwnerDeviceID != s.Sync.Device.ID || !lease.ExpiresAt.After(s.Sync.now()) {
-		return fmt.Errorf("lease_lost")
+	mount.LeaseID = lease.LeaseID
+	if mount.SyncStatus == "locked_read_only" {
+		mount.SyncStatus = "clean"
+	}
+	if err := s.Sync.upsertMount(mount); err != nil {
+		return err
 	}
 	return nil
+}
+
+// ensureLease refreshes an active local lease before a write. If it expired,
+// reacquireLease uses the Vault's conditional write to safely take a new one;
+// it still rejects an unexpired lease held by another device.
+func (s *CloudJournalStore) ensureLease(ctx context.Context, mount CloudJournalMountRecord) (VaultLease, error) {
+	data, _, err := s.Sync.Store.GetControl(ctx, s.Sync.Provider, mustVaultLease(s.CloudJournalID))
+	if err == nil {
+		lease, parseErr := parseVaultLease(data)
+		if parseErr == nil && lease.OwnerDeviceID == s.Sync.Device.ID && lease.ExpiresAt.After(s.Sync.now()) {
+			return s.Sync.RenewLease(ctx, s.CloudJournalID, lease.LeaseID)
+		}
+	}
+	return s.Sync.acquireLease(ctx, s.CloudJournalID, mount.LastCurrentToken)
 }

@@ -27,7 +27,7 @@ export type TreeItem = {
   children: TreeItem[]
 }
 
-export type VaultProviderRequest = { id: string, name: string, kind: string, root: string, credentialRef: string, publishDebounceMs: number, publishMaxIntervalMs: number, revisionRetentionCount: number }
+export type VaultProviderRequest = { id: string, name: string, kind: string, endpoint: string, root: string, credentialRef: string, publishDebounceMs: number, publishMaxIntervalMs: number, revisionRetentionCount: number }
 export type VaultProviderResponse = Omit<VaultProviderRequest, 'credentialRef'> & { validated: boolean }
 export type CloudMountResponse = { cloudJournalId: string, providerId: string, cachePath: string, lastRevisionId: string, syncStatus: string, lastSyncError: string, lastSyncedAt: string, readOnly: boolean, statusReason: string }
 export type CloudJournalResponse = { cloudJournalId: string, mount: CloudMountResponse, tree: TreeResponse }
@@ -139,6 +139,7 @@ type BackendAPI = {
   RemoveVaultProvider: (providerId: string) => Promise<void>
   ListCloudMounts: () => Promise<CloudMountResponse[]>
   CreateCloudJournal: (providerId: string) => Promise<CloudJournalResponse>
+  CreateLocalCloudJournal: () => Promise<CloudJournalResponse>
   ReconnectCloudJournal: (providerId: string, cloudJournalId: string) => Promise<CloudJournalResponse>
   SyncCloudJournal: (cloudJournalId: string) => Promise<CloudMountResponse>
   ReleaseCloudLease: (cloudJournalId: string) => Promise<void>
@@ -200,6 +201,7 @@ function missingBackend(): BackendAPI {
     RemoveVaultProvider: fail,
     ListCloudMounts: fail,
     CreateCloudJournal: fail,
+    CreateLocalCloudJournal: fail,
     ReconnectCloudJournal: fail,
     SyncCloudJournal: fail,
     ReleaseCloudLease: fail,

@@ -23,11 +23,14 @@ type App struct {
 	installation      *InstallationRepository
 	cloudServices     map[string]*JournalService
 	cloudMu           sync.Mutex
+	cloudWriteMu      sync.Mutex
 	commands          *Commands
 	selectedJournalID string
 	exportJournalItem *menu.MenuItem
 	importJournalItem *menu.MenuItem
 }
+
+const localVaultProviderID = "journal-local-vault"
 
 func NewApp() *App {
 	return &App{}
@@ -118,12 +121,16 @@ func (a *App) ListVaultProviders() ([]VaultProviderResponse, error) {
 	}
 	out := make([]VaultProviderResponse, 0, len(providers))
 	for _, p := range providers {
+		// Filesystem is an internal development transport, not a user-selectable Vault.
+		if p.Kind == "filesystem" {
+			continue
+		}
 		out = append(out, providerResponse(p, false))
 	}
 	return out, nil
 }
 func (a *App) SaveVaultProvider(request VaultProviderRequest) (VaultProviderResponse, error) {
-	p, err := a.installation.UpsertProvider(VaultProviderRecord{ID: request.ID, Name: request.Name, Kind: request.Kind, RootPrefix: request.Root, CredentialRef: request.CredentialRef, PublishDebounceMS: request.PublishDebounceMS, PublishMaxIntervalMS: request.PublishMaxIntervalMS, RevisionRetentionCount: request.RevisionRetentionCount})
+	p, err := a.installation.UpsertProvider(VaultProviderRecord{ID: request.ID, Name: request.Name, Kind: request.Kind, Endpoint: request.Endpoint, RootPrefix: request.Root, CredentialRef: request.CredentialRef, PublishDebounceMS: request.PublishDebounceMS, PublishMaxIntervalMS: request.PublishMaxIntervalMS, RevisionRetentionCount: request.RevisionRetentionCount})
 	if err != nil {
 		return VaultProviderResponse{}, err
 	}
@@ -144,10 +151,10 @@ func (a *App) ValidateVaultProvider(providerID string) (VaultProviderResponse, e
 	return providerResponse(p, true), nil
 }
 func (a *App) RemoveVaultProvider(providerID string) error {
-	return a.installation.RemoveProvider(providerID, func(m CloudJournalMountRecord) bool { return m.SyncStatus != "clean" })
+	return a.installation.RemoveProvider(providerID, nil)
 }
 func providerResponse(p VaultProviderRecord, validated bool) VaultProviderResponse {
-	return VaultProviderResponse{ID: p.ID, Name: p.Name, Kind: p.Kind, Root: p.RootPrefix, PublishDebounceMS: p.PublishDebounceMS, PublishMaxIntervalMS: p.PublishMaxIntervalMS, RevisionRetentionCount: p.RevisionRetentionCount, Validated: validated}
+	return VaultProviderResponse{ID: p.ID, Name: p.Name, Kind: p.Kind, Endpoint: p.Endpoint, Root: p.RootPrefix, PublishDebounceMS: p.PublishDebounceMS, PublishMaxIntervalMS: p.PublishMaxIntervalMS, RevisionRetentionCount: p.RevisionRetentionCount, Validated: validated}
 }
 func (a *App) ListCloudMounts() ([]CloudMountResponse, error) {
 	mounts, err := a.installation.ListMounts()
@@ -184,6 +191,34 @@ func (a *App) CreateCloudJournal(providerID string) (CloudJournalResponse, error
 	tree, err := a.GetLibraryTree()
 	return CloudJournalResponse{CloudJournalID: id, Mount: mountResponse(mount), Tree: tree}, err
 }
+
+// CreateLocalCloudJournal provisions the app-owned filesystem Vault used for
+// local cloud-workflow testing. It is deliberately not exposed as a provider
+// setting: users should not need to configure a path or credentials for it.
+func (a *App) CreateLocalCloudJournal() (CloudJournalResponse, error) {
+	provider, err := a.ensureLocalVaultProvider()
+	if err != nil {
+		return CloudJournalResponse{}, err
+	}
+	return a.CreateCloudJournal(provider.ID)
+}
+
+func (a *App) ensureLocalVaultProvider() (VaultProviderRecord, error) {
+	if a.installation == nil || a.cloudCaches == nil {
+		return VaultProviderRecord{}, fmt.Errorf("local Vault is unavailable before app startup")
+	}
+	root := filepath.Join(filepath.Dir(a.cloudCaches.root), "local-vault")
+	return a.installation.UpsertProvider(VaultProviderRecord{
+		ID:                     localVaultProviderID,
+		Name:                   "Local Vault",
+		Kind:                   "filesystem",
+		RootPrefix:             root,
+		PublishDebounceMS:      30000,
+		PublishMaxIntervalMS:   300000,
+		RevisionRetentionCount: 50,
+	})
+}
+
 func (a *App) ReconnectCloudJournal(providerID, cloudJournalID string) (CloudJournalResponse, error) {
 	sync, err := a.syncForProvider(providerID)
 	if err != nil {
@@ -208,6 +243,11 @@ func (a *App) SyncCloudJournal(cloudJournalID string) (CloudMountResponse, error
 	mount, err := a.installationMount(cloudJournalID)
 	if err != nil {
 		return CloudMountResponse{}, err
+	}
+	// A clean mount already points at the latest published revision. Publishing
+	// again would create an empty revision, so report its current state instead.
+	if mount.SyncStatus != "dirty" {
+		return mountResponse(mount), nil
 	}
 	sync, err := a.syncForProvider(mount.ProviderID)
 	if err != nil {
@@ -297,6 +337,8 @@ func (a *App) requireWritable(service *JournalService) error {
 	if service.StoreKind() != StoreKindCloud {
 		return nil
 	}
+	a.cloudWriteMu.Lock()
+	defer a.cloudWriteMu.Unlock()
 	mount, err := a.installationMount(strings.TrimPrefix(string(service.StoreID()), "cloud:"))
 	if err != nil {
 		return err
@@ -328,7 +370,11 @@ func (a *App) CreateDocument(parentID string) (DocumentResponse, error) {
 	if err := a.requireWritable(service); err != nil {
 		return DocumentResponse{}, err
 	}
-	return service.CreateDocument(parentID)
+	response, err := service.CreateDocument(parentID)
+	if err == nil {
+		err = a.markCloudDirty(service)
+	}
+	return a.withAggregateDocumentTree(response, err)
 }
 
 func (a *App) DuplicateDocument(id string) (DocumentResponse, error) {
@@ -336,7 +382,11 @@ func (a *App) DuplicateDocument(id string) (DocumentResponse, error) {
 	if err := a.requireWritable(service); err != nil {
 		return DocumentResponse{}, err
 	}
-	return service.DuplicateDocument(id)
+	response, err := service.DuplicateDocument(id)
+	if err == nil {
+		err = a.markCloudDirty(service)
+	}
+	return a.withAggregateDocumentTree(response, err)
 }
 
 func (a *App) CreateFolder(parentID string, title string) (ItemResponse, error) {
@@ -344,11 +394,16 @@ func (a *App) CreateFolder(parentID string, title string) (ItemResponse, error) 
 	if err := a.requireWritable(service); err != nil {
 		return ItemResponse{}, err
 	}
-	return service.CreateFolder(parentID, title)
+	response, err := service.CreateFolder(parentID, title)
+	if err == nil {
+		err = a.markCloudDirty(service)
+	}
+	return a.withAggregateItemTree(response, err)
 }
 
 func (a *App) CreateJournal(title string) (ItemResponse, error) {
-	return a.commands.library.CreateJournal(title)
+	response, err := a.commands.library.CreateJournal(title)
+	return a.withAggregateItemTree(response, err)
 }
 
 func (a *App) RenameItem(id string, title string) (ItemResponse, error) {
@@ -356,7 +411,14 @@ func (a *App) RenameItem(id string, title string) (ItemResponse, error) {
 	if err := a.requireWritable(service); err != nil {
 		return ItemResponse{}, err
 	}
-	return service.RenameItem(id, title)
+	response, err := service.RenameItem(id, title)
+	if err == nil {
+		err = a.updateCloudJournalMetadata(service, response.Item)
+	}
+	if err == nil {
+		err = a.markCloudDirty(service)
+	}
+	return a.withAggregateItemTree(response, err)
 }
 
 func (a *App) MoveItem(id string, newParentID string, newSortOrder int) (TreeResponse, error) {
@@ -372,15 +434,79 @@ func (a *App) DeleteJournal(id string) (TreeResponse, error) {
 }
 
 func (a *App) OpenDocument(id string) (DocumentResponse, error) {
-	return a.contentServiceForItem(id).OpenDocument(id)
+	response, err := a.contentServiceForItem(id).OpenDocument(id)
+	return a.withAggregateDocumentTree(response, err)
+}
+
+// Wails callers render one unified library. JournalService responses contain
+// only their owning store's tree, so normalize each item/document mutation to
+// the aggregate tree before crossing the RPC boundary.
+func (a *App) withAggregateItemTree(response ItemResponse, operationErr error) (ItemResponse, error) {
+	if operationErr != nil {
+		return ItemResponse{}, operationErr
+	}
+	tree, err := a.GetLibraryTree()
+	if err != nil {
+		return ItemResponse{}, err
+	}
+	response.Tree = tree
+	return response, nil
+}
+
+func (a *App) withAggregateDocumentTree(response DocumentResponse, operationErr error) (DocumentResponse, error) {
+	if operationErr != nil {
+		return DocumentResponse{}, operationErr
+	}
+	tree, err := a.GetLibraryTree()
+	if err != nil {
+		return DocumentResponse{}, err
+	}
+	response.Tree = tree
+	return response, nil
+}
+
+func (a *App) markCloudDirty(service *JournalService) error {
+	if service == nil || service.StoreKind() != StoreKindCloud {
+		return nil
+	}
+	cloudJournalID := strings.TrimPrefix(string(service.StoreID()), "cloud:")
+	return a.installation.SetMountSyncStatus(cloudJournalID, "dirty", "")
+}
+
+func (a *App) updateCloudJournalMetadata(service *JournalService, item TreeItem) error {
+	if service == nil || service.StoreKind() != StoreKindCloud || item.Kind != KindJournal {
+		return nil
+	}
+	cloudJournalID := strings.TrimPrefix(string(service.StoreID()), "cloud:")
+	mount, err := a.installationMount(cloudJournalID)
+	if err != nil {
+		return err
+	}
+	sync, err := a.syncForProvider(mount.ProviderID)
+	if err != nil {
+		return err
+	}
+	return sync.UpdateJournalMetadata(a.ctx, cloudJournalID, item.Title)
 }
 
 func (a *App) UpdateDocumentDraft(id string, content map[string]any, version int64) (DocumentDraftResponse, error) {
-	return a.commands.documents.UpdateDraft(id, content, version)
+	service := a.contentServiceForItem(id)
+	if err := a.requireWritable(service); err != nil {
+		return DocumentDraftResponse{}, err
+	}
+	return service.UpdateDocumentDraft(id, content, version)
 }
 
 func (a *App) CreateDocumentAttachment(documentID string, name string, mimeType string, dataBase64 string) (DocumentAttachmentResponse, error) {
-	return a.commands.documents.CreateAttachment(documentID, name, mimeType, dataBase64)
+	service := a.contentServiceForItem(documentID)
+	if err := a.requireWritable(service); err != nil {
+		return DocumentAttachmentResponse{}, err
+	}
+	response, err := service.CreateDocumentAttachment(documentID, name, mimeType, dataBase64)
+	if err == nil {
+		err = a.markCloudDirty(service)
+	}
+	return response, err
 }
 
 func (a *App) PickDocumentImage(documentID string) (DocumentAttachmentResponse, error) {
@@ -400,19 +526,73 @@ func (a *App) PickDocumentImage(documentID string) (DocumentAttachmentResponse, 
 	if strings.TrimSpace(path) == "" {
 		return DocumentAttachmentResponse{}, nil
 	}
-	return a.commands.documents.CreateAttachmentFromPath(documentID, path)
+	service := a.contentServiceForItem(documentID)
+	if err := a.requireWritable(service); err != nil {
+		return DocumentAttachmentResponse{}, err
+	}
+	response, err := service.CreateDocumentAttachmentFromPath(documentID, path)
+	if err == nil {
+		err = a.markCloudDirty(service)
+	}
+	return response, err
 }
 
 func (a *App) GetDocumentAttachmentDataURL(attachmentID string) (DocumentAttachmentDataResponse, error) {
-	return a.commands.documents.AttachmentDataURL(attachmentID)
+	service, err := a.contentServiceForAttachment(attachmentID)
+	if err != nil {
+		return DocumentAttachmentDataResponse{}, err
+	}
+	return service.GetDocumentAttachmentDataURL(attachmentID)
 }
 
 func (a *App) UpdateDocumentSpacing(id string, spacingPreset string) (DocumentSaveResponse, error) {
-	return a.commands.documents.UpdateSpacing(id, spacingPreset)
+	service := a.contentServiceForItem(id)
+	if err := a.requireWritable(service); err != nil {
+		return DocumentSaveResponse{}, err
+	}
+	response, err := service.UpdateDocumentSpacing(id, spacingPreset)
+	if err == nil {
+		err = a.markCloudDirty(service)
+	}
+	return response, err
 }
 
 func (a *App) FlushDocument(id string) (DocumentSaveResponse, error) {
-	return a.commands.documents.Flush(id)
+	service := a.contentServiceForItem(id)
+	if err := a.requireWritable(service); err != nil {
+		return DocumentSaveResponse{}, err
+	}
+	response, err := service.FlushDocument(id)
+	if err == nil {
+		err = a.markCloudDirty(service)
+	}
+	return response, err
+}
+
+func (a *App) contentServiceForAttachment(attachmentID string) (*JournalService, error) {
+	attachmentID = strings.TrimSpace(attachmentID)
+	if attachmentID == "" {
+		return nil, fmt.Errorf("attachment id is required")
+	}
+	if attachmentExists(a.service, attachmentID) {
+		return a.service, nil
+	}
+	a.cloudMu.Lock()
+	defer a.cloudMu.Unlock()
+	for _, service := range a.cloudServices {
+		if attachmentExists(service, attachmentID) {
+			return service, nil
+		}
+	}
+	return nil, fmt.Errorf("attachment not found")
+}
+
+func attachmentExists(service *JournalService, attachmentID string) bool {
+	if service == nil {
+		return false
+	}
+	var found int
+	return service.db.QueryRow(`SELECT 1 FROM document_attachments WHERE id = ?`, attachmentID).Scan(&found) == nil
 }
 
 func (a *App) SearchLibrary(query string) (SearchResponse, error) {
