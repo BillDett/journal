@@ -33,6 +33,17 @@ export type ItemResponse = {
   tree: TreeResponse
 }
 
+export type JournalDetailsResponse = {
+  id: string
+  title: string
+  encryptionState: 'plaintext' | 'encrypted'
+  encryptionLocked: boolean
+  createdAt: string
+  documentCount: number
+  folderCount: number
+  imageCount: number
+}
+
 export type DocumentResponse = {
   id: string
   title: string
@@ -97,6 +108,7 @@ export type EncryptionStatusResponse = {
 type BackendAPI = {
   GetAppInfo: () => Promise<AppInfo>
   GetLibraryTree: () => Promise<TreeResponse>
+  GetJournalDetails: (journalId: string) => Promise<JournalDetailsResponse>
   CreateDocument: (parentId: string) => Promise<DocumentResponse>
   DuplicateDocument: (id: string) => Promise<DocumentResponse>
   CreateFolder: (parentId: string, title: string) => Promise<ItemResponse>
@@ -119,6 +131,7 @@ type BackendAPI = {
   ChangeMasterPassword: (currentPassword: string, newPassword: string) => Promise<EncryptionStatusResponse>
   EncryptJournal: (journalId: string) => Promise<TreeResponse>
   DecryptJournal: (journalId: string) => Promise<TreeResponse>
+  LockEncryptedJournals: () => Promise<EncryptionStatusResponse>
   ExportJournalDirectory: (journalId: string) => Promise<void>
   ImportMarkdownDirectory: () => Promise<ItemResponse>
   SetSelectedJournalForMenu: (journalId: string) => Promise<void>
@@ -149,6 +162,7 @@ function missingBackend(): BackendAPI {
       disclaimer: 'Journal is free and open source software.',
     }),
     GetLibraryTree: fail,
+    GetJournalDetails: fail,
     CreateDocument: fail,
     DuplicateDocument: fail,
     CreateFolder: fail,
@@ -171,6 +185,7 @@ function missingBackend(): BackendAPI {
     ChangeMasterPassword: fail,
     EncryptJournal: fail,
     DecryptJournal: fail,
+    LockEncryptedJournals: fail,
     ExportJournalDirectory: fail,
     ImportMarkdownDirectory: fail,
     SetSelectedJournalForMenu: fail,

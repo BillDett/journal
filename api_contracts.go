@@ -31,6 +31,17 @@ type ItemResponse struct {
 	Tree TreeResponse `json:"tree"`
 }
 
+type JournalDetailsResponse struct {
+	ID               string `json:"id"`
+	Title            string `json:"title"`
+	EncryptionState  string `json:"encryptionState"`
+	EncryptionLocked bool   `json:"encryptionLocked"`
+	CreatedAt        string `json:"createdAt"`
+	DocumentCount    int    `json:"documentCount"`
+	FolderCount      int    `json:"folderCount"`
+	ImageCount       int    `json:"imageCount"`
+}
+
 type DocumentResponse struct {
 	ID            string         `json:"id"`
 	Title         string         `json:"title"`

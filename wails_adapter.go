@@ -13,12 +13,16 @@ import (
 // App adapts Wails lifecycle events and RPC calls to application commands.
 
 type App struct {
-	ctx               context.Context
-	service           *JournalService
-	commands          *Commands
-	selectedJournalID string
-	exportJournalItem *menu.MenuItem
-	importJournalItem *menu.MenuItem
+	ctx                   context.Context
+	service               *JournalService
+	commands              *Commands
+	selectedJournalID     string
+	exportJournalItem     *menu.MenuItem
+	importJournalItem     *menu.MenuItem
+	journalEncryptionItem *menu.MenuItem
+	journalDetailsItem    *menu.MenuItem
+	deleteJournalItem     *menu.MenuItem
+	lockJournalsItem      *menu.MenuItem
 }
 
 func NewApp() *App {
@@ -73,6 +77,10 @@ func (a *App) shutdown(ctx context.Context) {
 
 func (a *App) GetLibraryTree() (TreeResponse, error) {
 	return a.commands.library.GetTree()
+}
+
+func (a *App) GetJournalDetails(journalID string) (JournalDetailsResponse, error) {
+	return a.commands.library.GetJournalDetails(journalID)
 }
 
 func (a *App) CreateDocument(parentID string) (DocumentResponse, error) {
@@ -185,6 +193,13 @@ func (a *App) DecryptJournal(journalID string) (TreeResponse, error) {
 	return a.commands.encryption.DecryptJournal(journalID)
 }
 
+func (a *App) LockEncryptedJournals() (EncryptionStatusResponse, error) {
+	if err := a.commands.encryption.Lock(); err != nil {
+		return EncryptionStatusResponse{}, err
+	}
+	return a.commands.encryption.Status()
+}
+
 func (a *App) GetAppSettings() (AppSettingsResponse, error) {
 	return a.commands.settings.Get()
 }
@@ -206,7 +221,7 @@ func (a *App) ShowAbout() {
 
 func (a *App) SetSelectedJournalForMenu(journalID string) {
 	a.selectedJournalID = strings.TrimSpace(journalID)
-	a.updateFileMenuState()
+	a.updateMenuState()
 }
 
 func (a *App) EmitExportJournalMenuAction() {
@@ -216,6 +231,35 @@ func (a *App) EmitExportJournalMenuAction() {
 	runtime.EventsEmit(a.ctx, "journal:menu-export-journal", a.selectedJournalID)
 }
 
+func (a *App) EmitJournalEncryptionMenuAction() {
+	if a.ctx == nil || a.selectedJournalID == "" || a.journalEncryptionItem == nil {
+		return
+	}
+	event := "journal:menu-encrypt-journal"
+	if a.journalEncryptionItem.Label == "Un-Encrypt Journal" {
+		event = "journal:menu-decrypt-journal"
+	}
+	runtime.EventsEmit(a.ctx, event, a.selectedJournalID)
+}
+
+func (a *App) EmitJournalDetailsMenuAction() {
+	if a.ctx != nil && a.selectedJournalID != "" {
+		runtime.EventsEmit(a.ctx, "journal:menu-journal-details", a.selectedJournalID)
+	}
+}
+
+func (a *App) EmitDeleteJournalMenuAction() {
+	if a.ctx != nil && a.selectedJournalID != "" {
+		runtime.EventsEmit(a.ctx, "journal:menu-delete-journal", a.selectedJournalID)
+	}
+}
+
+func (a *App) EmitLockJournalsMenuAction() {
+	if a.ctx != nil {
+		runtime.EventsEmit(a.ctx, "journal:menu-lock-journals")
+	}
+}
+
 func (a *App) EmitImportJournalMenuAction() {
 	if a.ctx == nil {
 		return
@@ -223,17 +267,60 @@ func (a *App) EmitImportJournalMenuAction() {
 	runtime.EventsEmit(a.ctx, "journal:menu-import-journal")
 }
 
-func (a *App) updateFileMenuState() {
-	enabled := strings.TrimSpace(a.selectedJournalID) != ""
-	if a.exportJournalItem != nil {
+func (a *App) updateMenuState() {
+	if a.importJournalItem != nil {
+		a.importJournalItem.Enable()
+	}
+	tree, treeErr := a.commands.library.GetTree()
+	status, statusErr := a.commands.encryption.Status()
+	var selected *TreeItem
+	for i := range tree.Items {
+		if tree.Items[i].ID == a.selectedJournalID && tree.Items[i].Kind == KindJournal {
+			selected = &tree.Items[i]
+			break
+		}
+	}
+	selectedOK := treeErr == nil && selected != nil
+	if a.journalEncryptionItem != nil {
+		label := "Encrypt Journal"
+		enabled := selectedOK && selected.EncryptionState == EncryptionPlaintext
+		if selectedOK && selected.EncryptionState == EncryptionEncrypted {
+			label, enabled = "Un-Encrypt Journal", true
+		}
+		a.journalEncryptionItem.SetLabel(label)
 		if enabled {
+			a.journalEncryptionItem.Enable()
+		} else {
+			a.journalEncryptionItem.Disable()
+		}
+	}
+	if a.journalDetailsItem != nil {
+		if selectedOK {
+			a.journalDetailsItem.Enable()
+		} else {
+			a.journalDetailsItem.Disable()
+		}
+	}
+	if a.exportJournalItem != nil {
+		if selectedOK {
 			a.exportJournalItem.Enable()
 		} else {
 			a.exportJournalItem.Disable()
 		}
 	}
-	if a.importJournalItem != nil {
-		a.importJournalItem.Enable()
+	if a.deleteJournalItem != nil {
+		if selectedOK && len(tree.Items) > 1 {
+			a.deleteJournalItem.Enable()
+		} else {
+			a.deleteJournalItem.Disable()
+		}
+	}
+	if a.lockJournalsItem != nil {
+		if statusErr == nil && status.Unlocked && len(status.EncryptedJournalIDs) > 0 {
+			a.lockJournalsItem.Enable()
+		} else {
+			a.lockJournalsItem.Disable()
+		}
 	}
 	if a.ctx != nil {
 		runtime.MenuUpdateApplicationMenu(a.ctx)

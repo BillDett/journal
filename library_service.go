@@ -23,6 +23,45 @@ func (s *JournalService) GetLibraryTree() (TreeResponse, error) {
 	return TreeResponse{Items: buildTree(items, nil), TrashID: trashID}, nil
 }
 
+func (s *JournalService) GetJournalDetails(journalID string) (JournalDetailsResponse, error) {
+	journalID = strings.TrimSpace(journalID)
+	item, err := s.getTreeItem(journalID)
+	if err != nil {
+		return JournalDetailsResponse{}, err
+	}
+	if item.Kind != KindJournal || item.ParentID != "" {
+		return JournalDetailsResponse{}, fmt.Errorf("item is not a journal")
+	}
+	details := JournalDetailsResponse{
+		ID: journalID, Title: item.Title, EncryptionState: item.EncryptionState,
+		EncryptionLocked: item.EncryptionLocked, CreatedAt: item.CreatedAt,
+	}
+	if item.EncryptionLocked {
+		return details, nil
+	}
+	if err := s.db.QueryRow(`WITH RECURSIVE descendants(id) AS (
+		SELECT id FROM items WHERE id = ?
+		UNION ALL
+		SELECT items.id FROM items JOIN descendants ON items.parent_id = descendants.id
+	)
+	SELECT
+		COALESCE(SUM(CASE WHEN kind = ? THEN 1 ELSE 0 END), 0),
+		COALESCE(SUM(CASE WHEN kind = ? THEN 1 ELSE 0 END), 0)
+	FROM items WHERE id IN descendants`, journalID, KindDocument, KindFolder).Scan(&details.DocumentCount, &details.FolderCount); err != nil {
+		return JournalDetailsResponse{}, err
+	}
+	if err := s.db.QueryRow(`WITH RECURSIVE descendants(id) AS (
+		SELECT id FROM items WHERE id = ?
+		UNION ALL
+		SELECT items.id FROM items JOIN descendants ON items.parent_id = descendants.id
+	)
+	SELECT COUNT(*) FROM document_attachments
+	WHERE detached_at IS NULL AND document_id IN (SELECT id FROM descendants)`, journalID).Scan(&details.ImageCount); err != nil {
+		return JournalDetailsResponse{}, err
+	}
+	return details, nil
+}
+
 func (s *JournalService) CreateFolder(parentID string, title string) (ItemResponse, error) {
 	parentID, err := s.resolveCreateParent(parentID)
 	if err != nil {

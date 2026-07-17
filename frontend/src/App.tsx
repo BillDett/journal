@@ -48,6 +48,7 @@ import {
   type AppInfo,
   type DocumentResponse,
   type EncryptionStatusResponse,
+  type JournalDetailsResponse,
   type ProseMirrorDoc,
   type SpacingPreset,
   type TreeItem,
@@ -92,6 +93,7 @@ function App() {
   const [tree, setTree] = useState<TreeItem[]>([])
   const [trashId, setTrashId] = useState('')
   const [activeDoc, setActiveDoc] = useState<DocumentResponse | null>(null)
+  const [journalDetails, setJournalDetails] = useState<JournalDetailsResponse | null>(null)
   const [selectedItemId, setSelectedItemId] = useState('')
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
   const [renamingId, setRenamingId] = useState('')
@@ -182,7 +184,7 @@ function App() {
   useEffect(() => {
     selectedJournalIdRef.current = selectedJournal?.id ?? ''
     void api.SetSelectedJournalForMenu(selectedJournal?.id ?? '')
-  }, [selectedJournal?.id])
+  }, [selectedJournal?.id, encryptionStatus.unlocked, encryptionStatus.encryptedJournalIds.length])
 
   useEffect(() => {
     let live = true
@@ -372,7 +374,10 @@ function App() {
   }
 
   async function openDocument(id: string) {
-    if (activeDoc?.id === id) return
+    if (activeDoc?.id === id) {
+      setJournalDetails(null)
+      return
+    }
     const requestVersion = operationCoordinator.current.nextDocumentRequest()
     if (!(await flushActive())) return
     if (!operationCoordinator.current.isCurrentDocumentRequest(requestVersion)) return
@@ -391,6 +396,7 @@ function App() {
     const hasSearch = Boolean(searchQuery.trim())
     latestDraft.current = null
     setActiveDoc(response)
+    setJournalDetails(null)
     setSelectedItemId(response.id)
     if (!hasSearch) {
       operationCoordinator.current.invalidateTreeRequests()
@@ -487,6 +493,32 @@ function App() {
     }
   }
 
+  async function showJournalDetails(journalId: string) {
+    try {
+      const details = await api.GetJournalDetails(journalId)
+      setJournalDetails(details)
+      setSelectedItemId(journalId)
+      setStatus('Journal details')
+    } catch (error) {
+      setLastError(messageFromError(error))
+    }
+  }
+
+  async function lockEncryptedJournals() {
+    if (!encryptionStatus.unlocked || encryptionStatus.encryptedJournalIds.length === 0) return
+    if (!(await flushActive())) return
+    try {
+      const status = await api.LockEncryptedJournals()
+      setEncryptionStatus(status)
+      await loadTree()
+      setExpanded((current) => new Set([...current].filter((id) => !encryptionStatus.encryptedJournalIds.includes(id))))
+      if (activeDoc && encryptedJournalIds(flattened).has(journalIdFor(flattened, activeDoc.id))) clearActiveDocument()
+      setStatus('Locked encrypted journals')
+    } catch (error) {
+      setLastError(messageFromError(error))
+    }
+  }
+
   useEffect(() => {
     if (!('runtime' in window)) return undefined
     const offExport = EventsOn('journal:menu-export-journal', (journalId?: string) => {
@@ -495,11 +527,21 @@ function App() {
     const offImport = EventsOn('journal:menu-import-journal', () => {
       void importJournal()
     })
+    const offEncrypt = EventsOn('journal:menu-encrypt-journal', (journalId?: string) => void encryptJournal(typeof journalId === 'string' ? journalId : selectedJournalIdRef.current))
+    const offDecrypt = EventsOn('journal:menu-decrypt-journal', (journalId?: string) => void decryptJournal(typeof journalId === 'string' ? journalId : selectedJournalIdRef.current))
+    const offDetails = EventsOn('journal:menu-journal-details', (journalId?: string) => void showJournalDetails(typeof journalId === 'string' ? journalId : selectedJournalIdRef.current))
+    const offDelete = EventsOn('journal:menu-delete-journal', (journalId?: string) => requestDelete(typeof journalId === 'string' ? journalId : selectedJournalIdRef.current))
+    const offLock = EventsOn('journal:menu-lock-journals', () => void lockEncryptedJournals())
     return () => {
       offExport?.()
       offImport?.()
+      offEncrypt?.()
+      offDecrypt?.()
+      offDetails?.()
+      offDelete?.()
+      offLock?.()
     }
-  }, [flushActive])
+  }, [flushActive, encryptionStatus, activeDoc, flattened])
 
   async function renameItem(id: string, title: string) {
     try {
@@ -543,6 +585,7 @@ function App() {
         setActiveDoc(null)
         setSaveState('idle')
       }
+      if (journalDetails?.id === id) setJournalDetails(null)
       setSelectedItemId('')
       setStatus(item.kind === 'journal' || inTrash ? 'Deleted permanently' : 'Moved to Trash')
     } catch (error) {
@@ -605,6 +648,7 @@ function App() {
       await refreshEncryptionStatus()
       await refreshVisibleTree(response.items, response.trashId)
       setExpanded((current) => new Set([...current, journalId]))
+      setJournalDetails(null)
       setStatus('Encrypted journal')
       setEncryptedNotice(encryptedJournalTitle(response.items, journalId))
     } catch (error) {
@@ -632,6 +676,7 @@ function App() {
       const response = await api.DecryptJournal(journalId)
       await refreshEncryptionStatus()
       await refreshVisibleTree(response.items, response.trashId)
+      setJournalDetails(null)
       if (closesActive) {
         clearActiveDocument()
       }
@@ -831,8 +876,6 @@ function App() {
                   onCreateDocument={(id) => void createDocument(id)}
                   onDuplicateDocument={requestDuplicateDocument}
                   onCreateFolder={(id) => void createFolder(id)}
-                  onEncryptJournal={(id) => void encryptJournal(id)}
-                  onDecryptJournal={(id) => void decryptJournal(id)}
                   onOpenEncryptedJournal={(id) => void openEncryptedJournal(id)}
                   onDragStart={setDraggedId}
                   onDrop={(id, parentId, sortOrder) => void moveItem(id, parentId, sortOrder)}
@@ -886,7 +929,9 @@ function App() {
             </div>
           )}
 
-          {activeDoc ? (
+          {journalDetails ? (
+            <JournalDetailsPane details={journalDetails}/>
+          ) : activeDoc ? (
             <EditorPane
               key={activeDoc.id}
               document={activeDoc}
@@ -984,6 +1029,29 @@ type EditorPaneProps = {
   onRename: (title: string) => void
   onTitleFocused?: () => void
   onEditorReady: (editor: Editor) => void
+}
+
+function JournalDetailsPane({details}: {details: JournalDetailsResponse}) {
+  const encryption = details.encryptionState === 'encrypted'
+    ? details.encryptionLocked ? 'Encrypted and locked' : 'Encrypted and unlocked'
+    : 'Not encrypted'
+  return (
+    <div className="journal-details">
+      <p className="journal-details-kicker">Journal</p>
+      <h1>{details.title}</h1>
+      {details.encryptionLocked ? (
+        <p className="journal-details-locked">Unlock encrypted Journals to see details</p>
+      ) : (
+        <dl>
+          <div><dt>Encryption status</dt><dd>{encryption}</dd></div>
+          <div><dt>Created</dt><dd>{formatTimestamp(details.createdAt)}</dd></div>
+          <div><dt>Documents</dt><dd>{details.documentCount}</dd></div>
+          <div><dt>Folders</dt><dd>{details.folderCount}</dd></div>
+          <div><dt>Images referenced by documents</dt><dd>{details.imageCount}</dd></div>
+        </dl>
+      )}
+    </div>
+  )
 }
 
 function EditorPane({document, focusTitle = false, saveState, status, onDraft, onSpacingPresetChange, onFlush, onError, onRename, onTitleFocused, onEditorReady}: EditorPaneProps) {
@@ -1626,8 +1694,6 @@ type TreeNodeProps = {
   onCreateDocument: (id: string) => void
   onDuplicateDocument: (id: string) => void
   onCreateFolder: (id: string) => void
-  onEncryptJournal: (id: string) => void
-  onDecryptJournal: (id: string) => void
   onOpenEncryptedJournal: (id: string) => void
   onDragStart: (id: string) => void
   onDrop: (id: string, parentId: string, sortOrder: number) => void
@@ -1736,15 +1802,7 @@ function TreeNode(props: TreeNodeProps) {
             event.stopPropagation()
             props.onCreateFolder(item.id)
           }} disabled={props.creationDisabled || isLockedJournal} title="New folder"><FolderPlus size={13}/></button>}
-          {isJournal && !isTrash && !isEncryptedJournal && <button type="button" onClick={(event) => {
-            event.stopPropagation()
-            props.onEncryptJournal(item.id)
-          }} title="Encrypt journal"><Lock size={13}/></button>}
-          {isJournal && !isTrash && isEncryptedJournal && <button type="button" onClick={(event) => {
-            event.stopPropagation()
-            props.onDecryptJournal(item.id)
-          }} title="Turn off encryption"><Unlock size={13}/></button>}
-          {!isTrash && <button type="button" onClick={(event) => {
+          {!isTrash && !isJournal && <button type="button" onClick={(event) => {
             event.stopPropagation()
             props.onDelete(item.id)
           }} disabled={deleteDisabled} title={deleteDisabled ? 'At least one journal is required' : 'Delete'}><Trash2 size={13}/></button>}

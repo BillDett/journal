@@ -21,6 +21,7 @@ func NewCommands(service *JournalService) *Commands {
 
 type LibraryCommands interface {
 	GetTree() (TreeResponse, error)
+	GetJournalDetails(journalID string) (JournalDetailsResponse, error)
 	CreateFolder(parentID, title string) (ItemResponse, error)
 	CreateJournal(title string) (ItemResponse, error)
 	RenameItem(id, title string) (ItemResponse, error)
@@ -48,6 +49,7 @@ type EncryptionCommands interface {
 	Status() (EncryptionStatusResponse, error)
 	CreateMasterPassword(password string) error
 	Unlock(password string) error
+	Lock() error
 	ChangeMasterPassword(currentPassword, newPassword string) error
 	EncryptJournal(journalID string) (TreeResponse, error)
 	DecryptJournal(journalID string) (TreeResponse, error)
@@ -61,6 +63,9 @@ type SettingsCommands interface {
 type libraryCommandService struct{ service *JournalService }
 
 func (c libraryCommandService) GetTree() (TreeResponse, error) { return c.service.GetLibraryTree() }
+func (c libraryCommandService) GetJournalDetails(journalID string) (JournalDetailsResponse, error) {
+	return c.service.GetJournalDetails(journalID)
+}
 func (c libraryCommandService) CreateFolder(parentID, title string) (ItemResponse, error) {
 	return c.service.CreateFolder(parentID, title)
 }
@@ -129,6 +134,9 @@ func (c encryptionCommandService) CreateMasterPassword(password string) error {
 }
 func (c encryptionCommandService) Unlock(password string) error {
 	return c.service.UnlockEncryption(password)
+}
+func (c encryptionCommandService) Lock() error {
+	return c.service.LockEncryption()
 }
 func (c encryptionCommandService) ChangeMasterPassword(currentPassword, newPassword string) error {
 	return c.service.ChangeMasterPassword(currentPassword, newPassword)

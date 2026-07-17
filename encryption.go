@@ -150,6 +150,27 @@ func (s *JournalService) UnlockEncryption(password string) error {
 	return nil
 }
 
+func (s *JournalService) LockEncryption() error {
+	s.cryptoMu.Lock()
+	for i := range s.masterKey {
+		s.masterKey[i] = 0
+	}
+	for _, key := range s.journalKeys {
+		for i := range key {
+			key[i] = 0
+		}
+	}
+	s.masterKey = nil
+	s.journalKeys = map[string][]byte{}
+	s.cryptoMu.Unlock()
+	if last := s.settingValue(settingLastDocumentID); last != "" {
+		if encrypted, _ := s.itemIsEncrypted(last); encrypted {
+			return s.rememberLastDocument("")
+		}
+	}
+	return nil
+}
+
 func (s *JournalService) ChangeMasterPassword(currentPassword string, newPassword string) error {
 	newPassword = strings.TrimSpace(newPassword)
 	if newPassword == "" {

@@ -56,17 +56,36 @@ func main() {
 
 func applicationMenu(app *App, name string) *menu.Menu {
 	fileMenu := menu.NewMenu()
-	app.exportJournalItem = fileMenu.AddText("Export Journal", nil, func(_ *menu.CallbackData) {
-		app.EmitExportJournalMenuAction()
-	})
 	app.importJournalItem = fileMenu.AddText("Import Journal", nil, func(_ *menu.CallbackData) {
 		app.EmitImportJournalMenuAction()
 	})
-	app.exportJournalItem.Disable()
 	file := menu.SubMenu("File", fileMenu)
 
+	journalMenu := menu.NewMenu()
+	app.journalEncryptionItem = journalMenu.AddText("Encrypt Journal", nil, func(_ *menu.CallbackData) {
+		app.EmitJournalEncryptionMenuAction()
+	})
+	app.journalDetailsItem = journalMenu.AddText("Journal Details", nil, func(_ *menu.CallbackData) {
+		app.EmitJournalDetailsMenuAction()
+	})
+	app.exportJournalItem = journalMenu.AddText("Export Journal", nil, func(_ *menu.CallbackData) {
+		app.EmitExportJournalMenuAction()
+	})
+	app.deleteJournalItem = journalMenu.AddText("Delete Journal", nil, func(_ *menu.CallbackData) {
+		app.EmitDeleteJournalMenuAction()
+	})
+	app.lockJournalsItem = journalMenu.AddText("Lock Journals", nil, func(_ *menu.CallbackData) {
+		app.EmitLockJournalsMenuAction()
+	})
+	app.journalEncryptionItem.Disable()
+	app.journalDetailsItem.Disable()
+	app.exportJournalItem.Disable()
+	app.deleteJournalItem.Disable()
+	app.lockJournalsItem.Disable()
+	journal := menu.SubMenu("Journal", journalMenu)
+
 	if runtime.GOOS == "darwin" {
-		return menu.NewMenuFromItems(menu.AppMenu(), file, menu.EditMenu(), menu.WindowMenu())
+		return menu.NewMenuFromItems(menu.AppMenu(), file, journal, menu.EditMenu(), menu.WindowMenu())
 	}
 
 	helpMenu := menu.NewMenu()
@@ -74,5 +93,5 @@ func applicationMenu(app *App, name string) *menu.Menu {
 		app.ShowAbout()
 	})
 	help := menu.SubMenu("Help", helpMenu)
-	return menu.NewMenuFromItems(file, help)
+	return menu.NewMenuFromItems(file, journal, help)
 }
