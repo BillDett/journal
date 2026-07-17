@@ -626,6 +626,34 @@ func (s *JournalService) encryptionBoundaryKeyID(id string) (string, error) {
 	return "", nil
 }
 
+func (s *JournalService) journalIDForEncryptionKey(keyID string) (string, error) {
+	keyID = strings.TrimSpace(keyID)
+	if keyID == "" {
+		return "", nil
+	}
+	var journalID string
+	err := s.db.QueryRow(`SELECT journal_id FROM journal_encryption_keys WHERE key_id = ?`, keyID).Scan(&journalID)
+	if err != nil {
+		return "", err
+	}
+	return journalID, nil
+}
+
+func (s *JournalService) encryptionJournalIDForItem(id string) (string, error) {
+	item, err := s.getRawRowItemFrom(s.db, id)
+	if err != nil || item.EncryptionState != EncryptionEncrypted {
+		return "", err
+	}
+	journalID, err := s.journalIDForItem(id)
+	if err != nil || journalID != "" {
+		return journalID, err
+	}
+	if !item.EncryptionKeyID.Valid {
+		return "", fmt.Errorf("encrypted item key is missing")
+	}
+	return s.journalIDForEncryptionKey(item.EncryptionKeyID.String)
+}
+
 func (s *JournalService) verifyMasterPassword(password string) ([]byte, error) {
 	password = strings.TrimSpace(password)
 	if password == "" {

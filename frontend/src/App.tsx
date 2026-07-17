@@ -535,7 +535,7 @@ function App() {
       setEncryptionStatus(status)
       await loadTree()
       setExpanded((current) => new Set([...current].filter((id) => !encryptionStatus.encryptedJournalIds.includes(id))))
-      if (activeDoc && encryptedJournalIds(flattened).has(journalIdFor(flattened, activeDoc.id))) clearActiveDocument()
+      if (activeDoc?.item.encryptionState === 'encrypted') clearActiveDocument()
       setStatus('Locked encrypted journals')
     } catch (error) {
       setLastError(messageFromError(error))

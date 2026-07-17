@@ -69,7 +69,7 @@ func (s *JournalService) createDocumentAttachment(documentID string, name string
 	contentBlob := data
 	var contentCiphertext []byte
 	if item.EncryptionState == EncryptionEncrypted {
-		journalID, err := s.journalIDForItem(documentID)
+		journalID, err := s.encryptionJournalIDForItem(documentID)
 		if err != nil {
 			return DocumentAttachmentResponse{}, err
 		}
@@ -120,7 +120,7 @@ func (s *JournalService) GetDocumentAttachmentDataURL(attachmentID string) (Docu
 	}
 	data := contentBlob
 	if item.EncryptionState == EncryptionEncrypted {
-		journalID, err := s.journalIDForItem(documentID)
+		journalID, err := s.encryptionJournalIDForItem(documentID)
 		if err != nil {
 			return DocumentAttachmentDataResponse{}, err
 		}

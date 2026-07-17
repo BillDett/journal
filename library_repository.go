@@ -79,11 +79,22 @@ func (s *JournalService) prepareItemsForDisplay(items []rowItem) ([]rowItem, err
 	display := make([]rowItem, 0, len(items))
 	for _, item := range items {
 		rootID := rootJournalIDForRows(byID, item.ID)
+		if rootID == "" && item.EncryptionState == EncryptionEncrypted && item.EncryptionKeyID.Valid {
+			var err error
+			rootID, err = s.journalIDForEncryptionKey(item.EncryptionKeyID.String)
+			if err != nil {
+				return nil, err
+			}
+		}
 		if item.Kind == KindJournal && item.EncryptionState == EncryptionEncrypted {
 			item.EncryptionLocked = lockedRoots[item.ID]
 		}
 		if item.Kind != KindJournal && item.EncryptionState == EncryptionEncrypted {
-			if lockedRoots[rootID] {
+			inTrash, err := s.isInTrash(item.ID)
+			if err != nil {
+				return nil, err
+			}
+			if lockedRoots[rootID] && !inTrash {
 				continue
 			}
 		}
@@ -103,7 +114,7 @@ func (s *JournalService) prepareItemForDisplay(item rowItem) (rowItem, error) {
 		}
 		return item, nil
 	}
-	rootID, err := s.journalIDForItem(item.ID)
+	rootID, err := s.encryptionJournalIDForItem(item.ID)
 	if err != nil {
 		return rowItem{}, err
 	}

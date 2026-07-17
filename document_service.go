@@ -112,7 +112,7 @@ func (s *JournalService) DuplicateDocument(id string) (DocumentResponse, error) 
 	var key []byte
 	keyID := ""
 	if rawItem.EncryptionState == EncryptionEncrypted {
-		journalID, err := s.journalIDForItem(id)
+		journalID, err := s.encryptionJournalIDForItem(id)
 		if err != nil {
 			return DocumentResponse{}, err
 		}
@@ -244,7 +244,7 @@ func (s *JournalService) OpenDocument(id string) (DocumentResponse, error) {
 	var schemaVersion int
 	var spacingPreset string
 	if rawItem.EncryptionState == EncryptionEncrypted {
-		journalID, err := s.journalIDForItem(id)
+		journalID, err := s.encryptionJournalIDForItem(id)
 		if err != nil {
 			return DocumentResponse{}, err
 		}
@@ -425,7 +425,7 @@ func (s *JournalService) saveDocumentContent(id string, content map[string]any) 
 	contentJSON := string(encoded)
 	var contentCiphertext []byte
 	if item.EncryptionState == EncryptionEncrypted {
-		journalID, err := s.journalIDForItem(id)
+		journalID, err := s.encryptionJournalIDForItem(id)
 		if err != nil {
 			return "", err
 		}
