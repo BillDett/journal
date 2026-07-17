@@ -6,6 +6,7 @@ import {
   AlignLeft,
   AlignRight,
   Bold,
+  BookMarked,
   BookOpenText,
   BookPlus,
   CheckSquare,
@@ -29,6 +30,7 @@ import {
   Redo2,
   Search,
   Settings,
+  Shield,
   Strikethrough,
   Table2,
   TableProperties,
@@ -1694,7 +1696,7 @@ function TreeNode(props: TreeNodeProps) {
         }} title={isExpanded ? 'Collapse' : 'Expand'}>
           {isContainer ? (isExpanded ? <ChevronDown size={15}/> : <ChevronRight size={15}/>) : <span/>}
         </button>
-        {isTrash ? <Trash2 size={16}/> : isEncryptedJournal ? <Lock size={16}/> : isJournal ? <BookOpenText size={16}/> : isFolder ? <Folder size={16}/> : <FileText size={16}/>}
+        {isTrash ? <Trash2 size={16}/> : isLockedJournal ? <Shield size={16}/> : isJournal ? isExpanded ? <BookOpenText size={16}/> : <BookMarked size={16}/> : isFolder ? <Folder size={16}/> : <FileText size={16}/>}
 
         {renamingId === item.id ? (
           <input

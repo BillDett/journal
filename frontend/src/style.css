@@ -342,29 +342,16 @@ body.is-resizing-library {
   opacity: 0.58;
 }
 
-.tree-row.encrypted {
-  background: #fff0f0;
-  border-color: #f0c9c9;
-  color: #31424a;
-}
-
-.tree-row.encrypted:hover,
-.tree-row.encrypted.active {
-  background: #ffe7e7;
-  border-color: #e8b9b9;
-}
-
-.tree-row.encrypted.selected {
-  background: #ffecec;
-  border-color: #dfaead;
-}
-
 .tree-row.encrypted > svg {
   color: #a73835;
 }
 
 .tree-row.locked .tree-title {
   color: #59636f;
+}
+
+.tree-row.encrypted .tree-title {
+  color: #a73835;
 }
 
 .tree-chevron {
