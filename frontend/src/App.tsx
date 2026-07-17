@@ -94,6 +94,7 @@ function App() {
   const [tree, setTree] = useState<TreeItem[]>([])
   const [trashId, setTrashId] = useState('')
   const [activeDoc, setActiveDoc] = useState<DocumentResponse | null>(null)
+  const [closeRequest, setCloseRequest] = useState(0)
   const [journalDetails, setJournalDetails] = useState<JournalDetailsResponse | null>(null)
   const [selectedItemId, setSelectedItemId] = useState('')
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
@@ -186,6 +187,14 @@ function App() {
     selectedJournalIdRef.current = selectedJournal?.id ?? ''
     void api.SetSelectedJournalForMenu(selectedJournal?.id ?? '')
   }, [selectedJournal?.id, encryptionStatus.unlocked, encryptionStatus.encryptedJournalIds.length])
+
+  useEffect(() => {
+    if (!('runtime' in window)) return undefined
+    return EventsOn('journal:before-close', () => {
+      if (activeDoc) setCloseRequest((current) => current + 1)
+      else void api.CompleteCloseAfterFlush()
+    })
+  }, [activeDoc])
 
   useEffect(() => {
     let live = true
@@ -563,8 +572,10 @@ function App() {
         setActiveDoc((current) => current ? {...current, title: response.item.title, updatedAt: response.item.updatedAt, item: response.item} : current)
       }
       setStatus('Renamed')
+      return true
     } catch (error) {
       setLastError(messageFromError(error))
+      return false
     }
   }
 
@@ -952,13 +963,16 @@ function App() {
               status={status}
               onDraft={updateActiveDraft}
               onSpacingPresetChange={(spacingPreset) => void updateActiveSpacing(spacingPreset)}
-              onFlush={() => void flushActive()}
+              onFlush={flushActive}
               onError={setLastError}
-              onRename={(title) => void renameItem(activeDoc.id, title)}
+              onRename={(title) => renameItem(activeDoc.id, title)}
               onTitleFocused={() => setTitleFocusDocumentId('')}
               onEditorReady={(editor) => {
                 ;(window as unknown as {journalEditor?: Editor}).journalEditor = editor
               }}
+              closeRequest={closeRequest}
+              onCloseFlushed={() => void api.CompleteCloseAfterFlush()}
+              onCloseFlushFailed={() => void api.CancelCloseAfterFlushFailure()}
             />
           ) : (
             <div className="empty-editor">
@@ -1036,11 +1050,14 @@ type EditorPaneProps = {
   status: string
   onDraft: (content: ProseMirrorDoc) => Promise<void>
   onSpacingPresetChange: (spacingPreset: SpacingPreset) => void
-  onFlush: () => void
+  onFlush: () => Promise<boolean>
   onError: (message: string) => void
-  onRename: (title: string) => void
+  onRename: (title: string) => Promise<boolean>
   onTitleFocused?: () => void
   onEditorReady: (editor: Editor) => void
+  closeRequest: number
+  onCloseFlushed: () => void
+  onCloseFlushFailed: () => void
 }
 
 function JournalDetailsPane({details}: {details: JournalDetailsResponse}) {
@@ -1066,7 +1083,7 @@ function JournalDetailsPane({details}: {details: JournalDetailsResponse}) {
   )
 }
 
-function EditorPane({document, focusTitle = false, saveState, status, onDraft, onSpacingPresetChange, onFlush, onError, onRename, onTitleFocused, onEditorReady}: EditorPaneProps) {
+function EditorPane({document, focusTitle = false, saveState, status, onDraft, onSpacingPresetChange, onFlush, onError, onRename, onTitleFocused, onEditorReady, closeRequest, onCloseFlushed, onCloseFlushFailed}: EditorPaneProps) {
   const [title, setTitle] = useState(document.title)
   const [linkPopover, setLinkPopover] = useState<LinkPopoverState | null>(null)
   const [canCreateLink, setCanCreateLink] = useState(false)
@@ -1082,6 +1099,7 @@ function EditorPane({document, focusTitle = false, saveState, status, onDraft, o
   const onDraftRef = useRef(onDraft)
   const onFlushRef = useRef(onFlush)
   const onEditorReadyRef = useRef(onEditorReady)
+  const handledCloseRequest = useRef(0)
 
   useEffect(() => {
     onDraftRef.current = onDraft
@@ -1207,23 +1225,34 @@ function EditorPane({document, focusTitle = false, saveState, status, onDraft, o
 
   useEffect(() => () => window.clearTimeout(draftTimer.current), [])
 
-  function flushEditor() {
+  useEffect(() => {
+    if (closeRequest === 0 || closeRequest === handledCloseRequest.current) return
+    handledCloseRequest.current = closeRequest
     void (async () => {
-      if (pendingDraft.current) {
-        await submitDraft()
-      }
-      onFlushRef.current()
+      const flushed = await flushEditor()
+      if (flushed) onCloseFlushed()
+      else onCloseFlushFailed()
     })()
+  }, [closeRequest, onCloseFlushed, onCloseFlushFailed])
+
+  async function flushEditor() {
+    if (title.trim() !== document.title) {
+      const renamed = await commitTitle()
+      if (!renamed) return false
+    }
+    if (pendingDraft.current) await submitDraft()
+    return onFlushRef.current()
   }
 
   function commitTitle(focusEditor = false) {
     const next = title.trim() || 'Untitled'
     setTitle(next)
-    onRename(next)
+    const renamed = next === document.title ? Promise.resolve(true) : onRename(next)
 
-    if (!focusEditor || !editor) return
+    if (!focusEditor || !editor) return renamed
     skipTitleBlurCommit.current = true
     editor.commands.focus('end')
+    return renamed
   }
 
   function openCreateLinkPopover() {

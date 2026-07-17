@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"sync"
 
 	"github.com/wailsapp/wails/v2/pkg/menu"
 	"github.com/wailsapp/wails/v2/pkg/runtime"
@@ -23,6 +24,9 @@ type App struct {
 	journalDetailsItem    *menu.MenuItem
 	deleteJournalItem     *menu.MenuItem
 	lockJournalsItem      *menu.MenuItem
+	closeMu               sync.Mutex
+	closeRequested        bool
+	allowClose            bool
 }
 
 func NewApp() *App {
@@ -61,6 +65,9 @@ func (a *App) showStartupError(title, message string) {
 		DefaultButton: "Quit",
 		CancelButton:  "Quit",
 	})
+	a.closeMu.Lock()
+	a.allowClose = true
+	a.closeMu.Unlock()
 	runtime.Quit(a.ctx)
 }
 
@@ -73,6 +80,39 @@ func (a *App) shutdown(ctx context.Context) {
 		_ = a.service.FlushAll()
 		_ = a.service.Close()
 	}
+}
+
+func (a *App) beforeClose(ctx context.Context) bool {
+	a.closeMu.Lock()
+	if a.allowClose {
+		a.closeMu.Unlock()
+		return false
+	}
+	if a.closeRequested {
+		a.closeMu.Unlock()
+		return true
+	}
+	a.closeRequested = true
+	a.closeMu.Unlock()
+	runtime.EventsEmit(ctx, "journal:before-close")
+	return true
+}
+
+func (a *App) CompleteCloseAfterFlush() {
+	if a.ctx == nil {
+		return
+	}
+	a.closeMu.Lock()
+	a.allowClose = true
+	a.closeRequested = false
+	a.closeMu.Unlock()
+	runtime.Quit(a.ctx)
+}
+
+func (a *App) CancelCloseAfterFlushFailure() {
+	a.closeMu.Lock()
+	a.closeRequested = false
+	a.closeMu.Unlock()
 }
 
 func (a *App) GetLibraryTree() (TreeResponse, error) {

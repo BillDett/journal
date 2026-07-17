@@ -136,6 +136,8 @@ type BackendAPI = {
   ExportJournalDirectory: (journalId: string) => Promise<void>
   ImportMarkdownDirectory: () => Promise<ItemResponse>
   SetSelectedJournalForMenu: (journalId: string) => Promise<void>
+  CompleteCloseAfterFlush: () => Promise<void>
+  CancelCloseAfterFlushFailure: () => Promise<void>
   GetAppSettings: () => Promise<AppSettingsResponse>
   UpdateAppSettings: (settings: AppSettingsPatch) => Promise<AppSettingsResponse>
 }
@@ -191,6 +193,8 @@ function missingBackend(): BackendAPI {
     ExportJournalDirectory: fail,
     ImportMarkdownDirectory: fail,
     SetSelectedJournalForMenu: fail,
+    CompleteCloseAfterFlush: fail,
+    CancelCloseAfterFlushFailure: fail,
     GetAppSettings: fail,
     UpdateAppSettings: fail,
   }
