@@ -1121,7 +1121,7 @@ function SettingsPane({autosaveInterval, databaseLocation, masterPasswordConfigu
         <h2>Editing</h2>
         <div className="settings-row">
           <div><h3>Autosave interval</h3><p>How often edits are saved while you work.</p></div>
-          <label><input type="number" min={500} step={250} value={autosaveInterval} onChange={(event) => onAutosaveIntervalChange(Number(event.target.value))}/><span>ms</span></label>
+          <label><input type="number" min={0.5} step={0.25} value={autosaveInterval / 1000} onChange={(event) => onAutosaveIntervalChange(Math.round(Number(event.target.value) * 1000))}/><span>seconds</span></label>
         </div>
         <div className="settings-row">
           <div><h3>Journal database</h3><p className="database-path">{databaseLocation.path}</p></div>
