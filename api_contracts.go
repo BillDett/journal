@@ -100,6 +100,11 @@ type AppSettingsPatch struct {
 	LibraryWidth       int `json:"libraryWidth"`
 }
 
+type JournalDatabaseLocationResponse struct {
+	Path      string `json:"path"`
+	CanReveal bool   `json:"canReveal"`
+}
+
 // TrashItemCommand makes the destructive state transition explicit. The
 // expected state prevents a stale or repeated client request from escalating a
 // reversible move into permanent deletion.

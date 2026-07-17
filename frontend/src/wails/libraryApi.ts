@@ -88,6 +88,11 @@ export type AppSettingsPatch = {
   libraryWidth: number
 }
 
+export type JournalDatabaseLocationResponse = {
+  path: string
+  canReveal: boolean
+}
+
 export type TrashItemCommand = {
   id: string
   expectedInTrash: boolean
@@ -138,6 +143,8 @@ type BackendAPI = {
   SetSelectedJournalForMenu: (journalId: string) => Promise<void>
   CompleteCloseAfterFlush: () => Promise<void>
   CancelCloseAfterFlushFailure: () => Promise<void>
+  GetJournalDatabaseLocation: () => Promise<JournalDatabaseLocationResponse>
+  RevealJournalDatabaseFile: () => Promise<void>
   GetAppSettings: () => Promise<AppSettingsResponse>
   UpdateAppSettings: (settings: AppSettingsPatch) => Promise<AppSettingsResponse>
 }
@@ -195,6 +202,8 @@ function missingBackend(): BackendAPI {
     SetSelectedJournalForMenu: fail,
     CompleteCloseAfterFlush: fail,
     CancelCloseAfterFlushFailure: fail,
+    GetJournalDatabaseLocation: fail,
+    RevealJournalDatabaseFile: fail,
     GetAppSettings: fail,
     UpdateAppSettings: fail,
   }

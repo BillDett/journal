@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os/exec"
+	goRuntime "runtime"
 	"strings"
 	"sync"
 
@@ -261,6 +263,29 @@ func (a *App) LockEncryptedJournals() (EncryptionStatusResponse, error) {
 
 func (a *App) GetAppSettings() (AppSettingsResponse, error) {
 	return a.commands.settings.Get()
+}
+
+func (a *App) GetJournalDatabaseLocation() (JournalDatabaseLocationResponse, error) {
+	path, err := defaultDBPath()
+	if err != nil {
+		return JournalDatabaseLocationResponse{}, err
+	}
+	return JournalDatabaseLocationResponse{Path: path, CanReveal: goRuntime.GOOS != "linux"}, nil
+}
+
+func (a *App) RevealJournalDatabaseFile() error {
+	path, err := defaultDBPath()
+	if err != nil {
+		return err
+	}
+	switch goRuntime.GOOS {
+	case "darwin":
+		return exec.Command("open", "-R", path).Start()
+	case "windows":
+		return exec.Command("explorer.exe", "/select,", path).Start()
+	default:
+		return fmt.Errorf("revealing the database file is not supported on this operating system")
+	}
 }
 
 func (a *App) UpdateAppSettings(settings AppSettingsPatch) (AppSettingsResponse, error) {

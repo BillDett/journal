@@ -21,7 +21,6 @@ import {
   Highlighter,
   Image as ImageIcon,
   Italic,
-  KeyRound,
   Link2,
   List,
   ListOrdered,
@@ -50,6 +49,7 @@ import {
   type DocumentResponse,
   type EncryptionStatusResponse,
   type JournalDetailsResponse,
+  type JournalDatabaseLocationResponse,
   type ProseMirrorDoc,
   type SpacingPreset,
   type TreeItem,
@@ -86,6 +86,7 @@ type LinkPopoverState = {
 
 type EncryptionDialogState =
   | {mode: 'create', journalId: string}
+  | {mode: 'setup'}
   | {mode: 'unlock', journalId?: string, action?: 'encrypt' | 'decrypt' | 'open'}
   | {mode: 'change'}
   | null
@@ -113,6 +114,7 @@ function App() {
     disclaimer: 'Journal is free and open source software.',
   })
   const [autosaveInterval, setAutosaveInterval] = useState(2000)
+  const [databaseLocation, setDatabaseLocation] = useState<JournalDatabaseLocationResponse>({path: '', canReveal: false})
   const [draggedId, setDraggedId] = useState('')
   const [deleteTarget, setDeleteTarget] = useState<DeleteTarget>(null)
   const [duplicateTarget, setDuplicateTarget] = useState<DuplicateTarget>(null)
@@ -191,23 +193,24 @@ function App() {
   useEffect(() => {
     if (!('runtime' in window)) return undefined
     return EventsOn('journal:before-close', () => {
-      if (activeDoc) setCloseRequest((current) => current + 1)
+      if (activeDoc && !settingsOpen && !journalDetails) setCloseRequest((current) => current + 1)
       else void api.CompleteCloseAfterFlush()
     })
-  }, [activeDoc])
+  }, [activeDoc, journalDetails, settingsOpen])
 
   useEffect(() => {
     let live = true
     const requestVersion = operationCoordinator.current.nextTreeRequest()
     async function boot() {
       try {
-        const [treeResponse, settings, info, encryption] = await Promise.all([api.GetLibraryTree(), api.GetAppSettings(), api.GetAppInfo(), api.GetEncryptionStatus()])
+        const [treeResponse, settings, info, encryption, location] = await Promise.all([api.GetLibraryTree(), api.GetAppSettings(), api.GetAppInfo(), api.GetEncryptionStatus(), api.GetJournalDatabaseLocation()])
         if (!live) return
         if (operationCoordinator.current.isCurrentTreeRequest(requestVersion)) applyTree(treeResponse.items, treeResponse.trashId)
         setAutosaveInterval(settings.autosaveIntervalMs)
         setLibraryWidth(clampNumber(settings.libraryWidth || libraryWidthDefault, libraryWidthMin, libraryWidthMax))
         setAppInfo(info)
         setEncryptionStatus(encryption)
+        setDatabaseLocation(location)
         if (settings.lastDocumentId) {
           try {
             const response = await api.OpenDocument(settings.lastDocumentId)
@@ -741,6 +744,11 @@ function App() {
         setExpanded((current) => new Set([...current, dialog.journalId]))
         setStatus('Encrypted journal')
         setEncryptedNotice(encryptedJournalTitle(response.items, dialog.journalId))
+      } else if (dialog.mode === 'setup') {
+        await api.CreateMasterPassword(password)
+        await refreshEncryptionStatus()
+        setEncryptionDialog(null)
+        setStatus('Master password set')
       } else if (dialog.mode === 'unlock') {
         const status = await api.UnlockEncryption(password)
         setEncryptionStatus(status)
@@ -846,7 +854,7 @@ function App() {
               <button type="button" onClick={() => void createJournal()} disabled={creationDisabled} title="New journal"><BookPlus size={15}/></button>
               <button type="button" onClick={() => void createDocument(creationParentId)} disabled={creationDisabled} title="New document"><FilePlus size={15}/></button>
               <button type="button" onClick={() => void createFolder(creationParentId)} disabled={creationDisabled} title="New folder"><FolderPlus size={15}/></button>
-              <button type="button" className={settingsOpen ? 'icon-button active' : 'icon-button'} onClick={() => setSettingsOpen((value) => !value)} title="Autosave settings"><Settings size={15}/></button>
+              <button type="button" className={settingsOpen ? 'icon-button active' : 'icon-button'} onClick={() => setSettingsOpen((value) => !value)} title="Settings"><Settings size={15}/></button>
             </div>
           </div>
 
@@ -933,27 +941,18 @@ function App() {
         />
 
         <section className="document-workspace">
-          {settingsOpen && (
-            <div className="settings-strip">
-              <label>
-                Autosave interval
-                <input
-                  type="number"
-                  min={500}
-                  step={250}
-                  value={autosaveInterval}
-                  onChange={(event) => void updateAutosaveInterval(Number(event.target.value))}
-                />
-                <span>ms</span>
-              </label>
-              {encryptionStatus.masterPasswordConfigured && (
-                <button type="button" onClick={() => setEncryptionDialog({mode: 'change'})}><KeyRound size={14}/>Change master password</button>
-              )}
-            </div>
-          )}
-
-          {journalDetails ? (
-            <JournalDetailsPane details={journalDetails}/>
+          {settingsOpen ? (
+            <SettingsPane
+              autosaveInterval={autosaveInterval}
+              databaseLocation={databaseLocation}
+              masterPasswordConfigured={encryptionStatus.masterPasswordConfigured}
+              onAutosaveIntervalChange={(value) => void updateAutosaveInterval(value)}
+              onRevealDatabase={() => void api.RevealJournalDatabaseFile().catch((error) => setLastError(messageFromError(error)))}
+              onSetMasterPassword={() => setEncryptionDialog(encryptionStatus.masterPasswordConfigured ? {mode: 'change'} : {mode: 'setup'})}
+              onDone={() => setSettingsOpen(false)}
+            />
+          ) : journalDetails ? (
+            <JournalDetailsPane details={journalDetails} onDone={() => setJournalDetails(null)}/>
           ) : activeDoc ? (
             <EditorPane
               key={activeDoc.id}
@@ -1060,14 +1059,16 @@ type EditorPaneProps = {
   onCloseFlushFailed: () => void
 }
 
-function JournalDetailsPane({details}: {details: JournalDetailsResponse}) {
+function JournalDetailsPane({details, onDone}: {details: JournalDetailsResponse, onDone: () => void}) {
   const encryption = details.encryptionState === 'encrypted'
     ? details.encryptionLocked ? 'Encrypted and locked' : 'Encrypted and unlocked'
     : 'Not encrypted'
   return (
     <div className="journal-details">
-      <p className="journal-details-kicker">Journal</p>
-      <h1>{details.title}</h1>
+      <div className="journal-details-head">
+        <div><p className="journal-details-kicker">Journal</p><h1>{details.title}</h1></div>
+        <button type="button" onClick={onDone}>Done</button>
+      </div>
       {details.encryptionLocked ? (
         <p className="journal-details-locked">Unlock encrypted Journals to see details</p>
       ) : (
@@ -1079,6 +1080,43 @@ function JournalDetailsPane({details}: {details: JournalDetailsResponse}) {
           <div><dt>Images referenced by documents</dt><dd>{details.imageCount}</dd></div>
         </dl>
       )}
+    </div>
+  )
+}
+
+function SettingsPane({autosaveInterval, databaseLocation, masterPasswordConfigured, onAutosaveIntervalChange, onRevealDatabase, onSetMasterPassword, onDone}: {
+  autosaveInterval: number
+  databaseLocation: JournalDatabaseLocationResponse
+  masterPasswordConfigured: boolean
+  onAutosaveIntervalChange: (value: number) => void
+  onRevealDatabase: () => void
+  onSetMasterPassword: () => void
+  onDone: () => void
+}) {
+  return (
+    <div className="settings-page">
+      <div className="settings-page-head">
+        <h1>Settings</h1>
+        <button type="button" onClick={onDone}>Done</button>
+      </div>
+      <section>
+        <h2>Editing</h2>
+        <div className="settings-row">
+          <div><h3>Autosave interval</h3><p>How often edits are saved while you work.</p></div>
+          <label><input type="number" min={500} step={250} value={autosaveInterval} onChange={(event) => onAutosaveIntervalChange(Number(event.target.value))}/><span>ms</span></label>
+        </div>
+        <div className="settings-row">
+          <div><h3>Journal database</h3><p className="database-path">{databaseLocation.path}</p></div>
+          {databaseLocation.canReveal && <button type="button" onClick={onRevealDatabase}>Show in file manager</button>}
+        </div>
+      </section>
+      <section>
+        <h2>Security</h2>
+        <div className="settings-row">
+          <div><h3>Master password</h3><p>{masterPasswordConfigured ? 'Change the password that unlocks encrypted Journals.' : 'Set a password before encrypting a Journal.'}</p></div>
+          <button type="button" onClick={onSetMasterPassword}>{masterPasswordConfigured ? 'Change master password' : 'Set master password'}</button>
+        </div>
+      </section>
     </div>
   )
 }
@@ -1873,7 +1911,8 @@ function EncryptionDialog({state, onCancel, onSubmitPassword, onChangePassword}:
   const [newPassword, setNewPassword] = useState('')
   const [newPasswordConfirm, setNewPasswordConfirm] = useState('')
   const isChange = state.mode === 'change'
-  const title = state.mode === 'create' ? 'Create master password' : state.mode === 'change' ? 'Change master password' : 'Unlock encrypted journals'
+  const isCreate = state.mode === 'create' || state.mode === 'setup'
+  const title = isCreate ? 'Create master password' : state.mode === 'change' ? 'Change master password' : 'Unlock encrypted journals'
 
   useEffect(() => {
     function onKeyDown(event: KeyboardEvent) {
@@ -1890,7 +1929,7 @@ function EncryptionDialog({state, onCancel, onSubmitPassword, onChangePassword}:
       return
     }
     if (!password.trim()) return
-    if (state.mode === 'create' && password !== confirmPassword) return
+    if (isCreate && password !== confirmPassword) return
     onSubmitPassword(password)
   }
 
@@ -1907,12 +1946,12 @@ function EncryptionDialog({state, onCancel, onSubmitPassword, onChangePassword}:
         ) : (
           <div className="password-fields">
             <input type="password" value={password} autoFocus placeholder="Master password" onChange={(event) => setPassword(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') submit() }}/>
-            {state.mode === 'create' && <input type="password" value={confirmPassword} placeholder="Confirm password" onChange={(event) => setConfirmPassword(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') submit() }}/>}
+            {isCreate && <input type="password" value={confirmPassword} placeholder="Confirm password" onChange={(event) => setConfirmPassword(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') submit() }}/>}
           </div>
         )}
         <div className="dialog-actions">
           <button type="button" onClick={onCancel}>Cancel</button>
-          <button type="button" onClick={submit}>{isChange ? 'Change password' : state.mode === 'create' ? 'Create password' : 'Unlock'}</button>
+          <button type="button" onClick={submit}>{isChange ? 'Change password' : isCreate ? 'Create password' : 'Unlock'}</button>
         </div>
       </section>
     </div>
