@@ -30,18 +30,38 @@ func (a *App) startup(ctx context.Context) {
 
 	dbPath, err := defaultDBPath()
 	if err != nil {
-		panic(err)
+		a.showStartupError("Journal could not locate its database", err.Error())
+		return
 	}
 	service, err := OpenJournalService(dbPath)
 	if err != nil {
-		panic(err)
+		a.showStartupError("Journal could not open its database", startupDatabaseErrorMessage(dbPath, err))
+		return
 	}
 	if err := service.PurgeDetachedAttachments(detachedAttachmentGrace); err != nil {
-		panic(err)
+		_ = service.Close()
+		a.showStartupError("Journal could not finish starting", err.Error())
+		return
 	}
 	a.service = service
 	a.commands = NewCommands(service)
 	a.service.StartAutosave(ctx)
+}
+
+func (a *App) showStartupError(title, message string) {
+	_, _ = runtime.MessageDialog(a.ctx, runtime.MessageDialogOptions{
+		Type:          runtime.ErrorDialog,
+		Title:         title,
+		Message:       message,
+		Buttons:       []string{"Quit"},
+		DefaultButton: "Quit",
+		CancelButton:  "Quit",
+	})
+	runtime.Quit(a.ctx)
+}
+
+func startupDatabaseErrorMessage(dbPath string, err error) string {
+	return fmt.Sprintf("Database: %s\n\n%s\n\nJournal will now quit. If this database was created by a newer version, open it with that version or upgrade Journal. If a migration failed, restore the database from a backup before trying again.", dbPath, err)
 }
 
 func (a *App) shutdown(ctx context.Context) {

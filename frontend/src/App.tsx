@@ -992,6 +992,7 @@ function EditorPane({document, focusTitle = false, saveState, status, onDraft, o
   const [paragraphStyle, setParagraphStyle] = useState<ParagraphStyle>('normal')
   const [horizontalAlignment, setHorizontalAlignment] = useState<HorizontalAlignment>('left')
   const titleInputRef = useRef<HTMLInputElement | null>(null)
+  const skipTitleBlurCommit = useRef(false)
   const imageInputRef = useRef<HTMLInputElement | null>(null)
   const editorRef = useRef<Editor | null>(null)
   const draftTimer = useRef<number | undefined>(undefined)
@@ -1133,10 +1134,14 @@ function EditorPane({document, focusTitle = false, saveState, status, onDraft, o
     })()
   }
 
-  function commitTitle() {
+  function commitTitle(focusEditor = false) {
     const next = title.trim() || 'Untitled'
     setTitle(next)
     onRename(next)
+
+    if (!focusEditor || !editor) return
+    skipTitleBlurCommit.current = true
+    editor.commands.focus('end')
   }
 
   function openCreateLinkPopover() {
@@ -1217,11 +1222,22 @@ function EditorPane({document, focusTitle = false, saveState, status, onDraft, o
           className="title-input"
           value={title}
           onChange={(event) => setTitle(event.target.value)}
-          onBlur={commitTitle}
+          onBlur={() => {
+            if (skipTitleBlurCommit.current) {
+              skipTitleBlurCommit.current = false
+              return
+            }
+            commitTitle()
+          }}
           onKeyDown={(event) => {
-            if (event.key === 'Enter') event.currentTarget.blur()
+            if (event.key === 'Enter' || event.key === 'Tab') {
+              event.preventDefault()
+              commitTitle(true)
+            }
             if (event.key === 'Escape') {
+              event.preventDefault()
               setTitle(document.title)
+              skipTitleBlurCommit.current = true
               event.currentTarget.blur()
             }
           }}
