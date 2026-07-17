@@ -60,6 +60,10 @@ func applicationMenu(app *App, name string) *menu.Menu {
 	app.importJournalItem = fileMenu.AddText("Import Journal", nil, func(_ *menu.CallbackData) {
 		app.EmitImportJournalMenuAction()
 	})
+	app.emptyTrashItem = fileMenu.AddText("Empty Trash", nil, func(_ *menu.CallbackData) {
+		app.EmitEmptyTrashMenuAction()
+	})
+	app.emptyTrashItem.Disable()
 	file := menu.SubMenu("File", fileMenu)
 
 	journalMenu := menu.NewMenu()

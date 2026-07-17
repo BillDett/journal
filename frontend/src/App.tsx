@@ -117,6 +117,7 @@ function App() {
   const [databaseLocation, setDatabaseLocation] = useState<JournalDatabaseLocationResponse>({path: '', canReveal: false})
   const [draggedId, setDraggedId] = useState('')
   const [deleteTarget, setDeleteTarget] = useState<DeleteTarget>(null)
+  const [emptyTrashConfirm, setEmptyTrashConfirm] = useState(false)
   const [duplicateTarget, setDuplicateTarget] = useState<DuplicateTarget>(null)
   const [decryptTarget, setDecryptTarget] = useState<DecryptTarget>(null)
   const [encryptedNotice, setEncryptedNotice] = useState('')
@@ -555,6 +556,7 @@ function App() {
     const offDetails = EventsOn('journal:menu-journal-details', (journalId?: string) => void showJournalDetails(typeof journalId === 'string' ? journalId : selectedJournalIdRef.current))
     const offDelete = EventsOn('journal:menu-delete-journal', (journalId?: string) => requestDelete(typeof journalId === 'string' ? journalId : selectedJournalIdRef.current))
     const offLock = EventsOn('journal:menu-lock-journals', () => void lockEncryptedJournals())
+    const offEmptyTrash = EventsOn('journal:menu-empty-trash', () => setEmptyTrashConfirm(true))
     return () => {
       offExport?.()
       offImport?.()
@@ -563,8 +565,22 @@ function App() {
       offDetails?.()
       offDelete?.()
       offLock?.()
+      offEmptyTrash?.()
     }
   }, [flushActive, encryptionStatus, activeDoc, flattened])
+
+  async function emptyTrash() {
+    setEmptyTrashConfirm(false)
+    if (activeDoc && isDescendantOf(flattened, activeDoc.id, trashId) && !(await flushActive())) return
+    try {
+      const response = await api.EmptyTrash()
+      await refreshVisibleTree(response.items, response.trashId)
+      if (activeDoc && isDescendantOf(flattened, activeDoc.id, trashId)) clearActiveDocument()
+      setStatus('Emptied Trash')
+    } catch (error) {
+      setLastError(messageFromError(error))
+    }
+  }
 
   async function renameItem(id: string, title: string) {
     try {
@@ -998,6 +1014,8 @@ function App() {
               onConfirm={() => void confirmDelete()}
             />
           )}
+
+          {emptyTrashConfirm && <EmptyTrashDialog onCancel={() => setEmptyTrashConfirm(false)} onConfirm={() => void emptyTrash()}/>}
 
           {duplicateTarget && (
             <DuplicateDialog
@@ -1952,6 +1970,21 @@ function EncryptionDialog({state, onCancel, onSubmitPassword, onChangePassword}:
         <div className="dialog-actions">
           <button type="button" onClick={onCancel}>Cancel</button>
           <button type="button" onClick={submit}>{isChange ? 'Change password' : isCreate ? 'Create password' : 'Unlock'}</button>
+        </div>
+      </section>
+    </div>
+  )
+}
+
+function EmptyTrashDialog({onCancel, onConfirm}: {onCancel: () => void, onConfirm: () => void}) {
+  return (
+    <div className="dialog-backdrop" role="presentation" onMouseDown={onCancel}>
+      <section className="confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="empty-trash-title" onMouseDown={(event) => event.stopPropagation()}>
+        <h2 id="empty-trash-title">Empty Trash?</h2>
+        <p>This permanently deletes everything in Trash. This action cannot be undone.</p>
+        <div className="dialog-actions">
+          <button type="button" onClick={onCancel}>Cancel</button>
+          <button type="button" className="danger-action" onClick={onConfirm}>Empty Trash</button>
         </div>
       </section>
     </div>

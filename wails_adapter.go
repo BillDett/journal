@@ -22,6 +22,7 @@ type App struct {
 	selectedJournalID     string
 	exportJournalItem     *menu.MenuItem
 	importJournalItem     *menu.MenuItem
+	emptyTrashItem        *menu.MenuItem
 	journalEncryptionItem *menu.MenuItem
 	journalDetailsItem    *menu.MenuItem
 	deleteJournalItem     *menu.MenuItem
@@ -156,6 +157,8 @@ func (a *App) TrashItem(command TrashItemCommand) (TreeResponse, error) {
 func (a *App) DeleteJournal(id string) (TreeResponse, error) {
 	return a.commands.library.DeleteJournal(id)
 }
+
+func (a *App) EmptyTrash() (TreeResponse, error) { return a.commands.library.EmptyTrash() }
 
 func (a *App) OpenDocument(id string) (DocumentResponse, error) {
 	return a.commands.documents.Open(id)
@@ -351,6 +354,12 @@ func (a *App) EmitImportJournalMenuAction() {
 	runtime.EventsEmit(a.ctx, "journal:menu-import-journal")
 }
 
+func (a *App) EmitEmptyTrashMenuAction() {
+	if a.ctx != nil {
+		runtime.EventsEmit(a.ctx, "journal:menu-empty-trash")
+	}
+}
+
 func (a *App) updateMenuState() {
 	if a.importJournalItem != nil {
 		a.importJournalItem.Enable()
@@ -365,6 +374,20 @@ func (a *App) updateMenuState() {
 		}
 	}
 	selectedOK := treeErr == nil && selected != nil
+	if a.emptyTrashItem != nil {
+		hasTrashContents := false
+		for _, item := range tree.Items {
+			if item.SystemKey == SystemTrash && item.ItemCount > 0 {
+				hasTrashContents = true
+				break
+			}
+		}
+		if hasTrashContents {
+			a.emptyTrashItem.Enable()
+		} else {
+			a.emptyTrashItem.Disable()
+		}
+	}
 	if a.journalEncryptionItem != nil {
 		label := "Encrypt Journal"
 		enabled := selectedOK && selected.EncryptionState == EncryptionPlaintext

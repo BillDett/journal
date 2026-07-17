@@ -28,6 +28,7 @@ type LibraryCommands interface {
 	MoveItem(id, newParentID string, newSortOrder int) (TreeResponse, error)
 	TrashItem(command TrashItemCommand) (TreeResponse, error)
 	DeleteJournal(id string) (TreeResponse, error)
+	EmptyTrash() (TreeResponse, error)
 	Search(query string) (SearchResponse, error)
 	ExportJournal(journalID, targetDir string) error
 	ImportMarkdownDirectory(sourceDir string) (ItemResponse, error)
@@ -85,6 +86,7 @@ func (c libraryCommandService) TrashItem(command TrashItemCommand) (TreeResponse
 func (c libraryCommandService) DeleteJournal(id string) (TreeResponse, error) {
 	return c.service.DeleteJournal(id)
 }
+func (c libraryCommandService) EmptyTrash() (TreeResponse, error) { return c.service.EmptyTrash() }
 func (c libraryCommandService) Search(query string) (SearchResponse, error) {
 	return c.service.SearchLibrary(query)
 }

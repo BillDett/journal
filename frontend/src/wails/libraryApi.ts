@@ -122,6 +122,7 @@ type BackendAPI = {
   MoveItem: (id: string, newParentId: string, newSortOrder: number) => Promise<TreeResponse>
   TrashItem: (command: TrashItemCommand) => Promise<TreeResponse>
   DeleteJournal: (id: string) => Promise<TreeResponse>
+  EmptyTrash: () => Promise<TreeResponse>
   OpenDocument: (id: string) => Promise<DocumentResponse>
   ExportDocumentMarkdown: (documentId: string) => Promise<void>
   UpdateDocumentDraft: (id: string, content: ProseMirrorDoc, version: number) => Promise<{id: string, saveState: string, version: number}>
@@ -181,6 +182,7 @@ function missingBackend(): BackendAPI {
     MoveItem: fail,
     TrashItem: fail,
     DeleteJournal: fail,
+    EmptyTrash: fail,
     OpenDocument: fail,
     ExportDocumentMarkdown: fail,
     UpdateDocumentDraft: fail,

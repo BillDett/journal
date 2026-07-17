@@ -356,6 +356,37 @@ func (s *JournalService) PermanentlyDeleteItem(id string) (TreeResponse, error) 
 	return s.GetLibraryTree()
 }
 
+func (s *JournalService) EmptyTrash() (TreeResponse, error) {
+	s.operationMu.Lock()
+	defer s.operationMu.Unlock()
+	trashID, err := s.trashID()
+	if err != nil {
+		return TreeResponse{}, err
+	}
+	rows, err := s.db.Query(`SELECT id FROM items WHERE parent_id = ? ORDER BY sort_order, id`, trashID)
+	if err != nil {
+		return TreeResponse{}, err
+	}
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return TreeResponse{}, err
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return TreeResponse{}, err
+	}
+	for _, id := range ids {
+		if _, err := s.PermanentlyDeleteItem(id); err != nil {
+			return TreeResponse{}, err
+		}
+	}
+	return s.GetLibraryTree()
+}
+
 func (s *JournalService) DeleteJournal(id string) (TreeResponse, error) {
 	deletedIDs, _ := descendantIDs(s.db, id)
 	deletedIDs = append(deletedIDs, id)
