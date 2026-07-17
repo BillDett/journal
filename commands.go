@@ -37,6 +37,7 @@ type DocumentCommands interface {
 	Create(parentID string) (DocumentResponse, error)
 	Duplicate(id string) (DocumentResponse, error)
 	Open(id string) (DocumentResponse, error)
+	ExportMarkdown(id, targetPath string) error
 	UpdateDraft(id string, content map[string]any, version int64) (DocumentDraftResponse, error)
 	CreateAttachment(id, name, mimeType, dataBase64 string) (DocumentAttachmentResponse, error)
 	CreateAttachmentFromPath(id, path string) (DocumentAttachmentResponse, error)
@@ -104,6 +105,9 @@ func (c documentCommandService) Duplicate(id string) (DocumentResponse, error) {
 }
 func (c documentCommandService) Open(id string) (DocumentResponse, error) {
 	return c.service.OpenDocument(id)
+}
+func (c documentCommandService) ExportMarkdown(id, targetPath string) error {
+	return c.service.ExportDocumentToMarkdown(id, targetPath)
 }
 func (c documentCommandService) UpdateDraft(id string, content map[string]any, version int64) (DocumentDraftResponse, error) {
 	return c.service.UpdateDocumentDraft(id, content, version)

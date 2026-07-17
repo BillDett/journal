@@ -12,6 +12,7 @@ import {
   CheckSquare,
   ChevronDown,
   ChevronRight,
+  Download,
   FilePlus,
   FileText,
   Files,
@@ -479,6 +480,16 @@ function App() {
     }
   }
 
+  async function exportDocumentMarkdown(documentId: string) {
+    if (activeDoc?.id === documentId && !(await flushActive())) return
+    try {
+      await api.ExportDocumentMarkdown(documentId)
+      setStatus('Exported document')
+    } catch (error) {
+      setLastError(messageFromError(error))
+    }
+  }
+
   async function importJournal() {
     if (!(await flushActive())) return
     try {
@@ -870,6 +881,7 @@ function App() {
                   onToggle={(id) => setExpanded((current) => toggleSet(current, id))}
                   onSelect={setSelectedItemId}
                   onOpen={(id) => void openDocument(id)}
+                  onExportDocument={(id) => void exportDocumentMarkdown(id)}
                   onRenameStart={setRenamingId}
                   onRenameCommit={(id, title) => void renameItem(id, title)}
                   onDelete={requestDelete}
@@ -1688,6 +1700,7 @@ type TreeNodeProps = {
   onToggle: (id: string) => void
   onSelect: (id: string) => void
   onOpen: (id: string) => void
+  onExportDocument: (id: string) => void
   onRenameStart: (id: string) => void
   onRenameCommit: (id: string, title: string) => void
   onDelete: (id: string) => void
@@ -1798,6 +1811,10 @@ function TreeNode(props: TreeNodeProps) {
             event.stopPropagation()
             props.onDuplicateDocument(item.id)
           }} title="Duplicate document"><Files size={13}/></button>}
+          {item.kind === 'document' && !isTrash && <button type="button" onClick={(event) => {
+            event.stopPropagation()
+            props.onExportDocument(item.id)
+          }} title="Export document as Markdown"><Download size={13}/></button>}
           {isContainer && !isTrash && <button type="button" onClick={(event) => {
             event.stopPropagation()
             props.onCreateFolder(item.id)

@@ -119,6 +119,25 @@ func (a *App) OpenDocument(id string) (DocumentResponse, error) {
 	return a.commands.documents.Open(id)
 }
 
+func (a *App) ExportDocumentMarkdown(documentID string) error {
+	if a.ctx == nil {
+		return fmt.Errorf("app is not ready")
+	}
+	doc, err := a.commands.documents.Open(documentID)
+	if err != nil {
+		return err
+	}
+	targetPath, err := runtime.SaveFileDialog(a.ctx, runtime.SaveDialogOptions{
+		Title:           "Export Document as Markdown",
+		DefaultFilename: sanitizeFSName(doc.Title, "Untitled") + ".md",
+		Filters:         []runtime.FileFilter{{DisplayName: "Markdown (*.md)", Pattern: "*.md"}},
+	})
+	if err != nil || strings.TrimSpace(targetPath) == "" {
+		return err
+	}
+	return a.commands.documents.ExportMarkdown(documentID, targetPath)
+}
+
 func (a *App) UpdateDocumentDraft(id string, content map[string]any, version int64) (DocumentDraftResponse, error) {
 	return a.commands.documents.UpdateDraft(id, content, version)
 }

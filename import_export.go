@@ -354,6 +354,45 @@ func (s *JournalService) exportDocumentAttachments(documentID string, content ma
 	return attachments, nil
 }
 
+func (s *JournalService) ExportDocumentToMarkdown(documentID, targetPath string) error {
+	documentID = strings.TrimSpace(documentID)
+	targetPath = strings.TrimSpace(targetPath)
+	if documentID == "" || targetPath == "" {
+		return fmt.Errorf("document id and destination path are required")
+	}
+	if strings.ToLower(filepath.Ext(targetPath)) != ".md" {
+		targetPath += ".md"
+	}
+	doc, err := s.OpenDocument(documentID)
+	if err != nil {
+		return err
+	}
+	attachments, err := s.exportDocumentAttachments(documentID, doc.Content)
+	if err != nil {
+		return err
+	}
+	directory := filepath.Dir(targetPath)
+	if err := os.MkdirAll(directory, 0o755); err != nil {
+		return err
+	}
+	assetDirName := strings.TrimSuffix(filepath.Base(targetPath), ".md") + ".assets"
+	assetDirPath := filepath.Join(directory, assetDirName)
+	imageRefs := map[string]string{}
+	if len(attachments) > 0 {
+		if err := os.MkdirAll(assetDirPath, 0o755); err != nil {
+			return err
+		}
+		for _, attachment := range attachments {
+			assetName := uniqueChildName(assetDirPath, sanitizeFSName(trimExtension(attachment.OriginalName), "image"), extensionOrDefault(attachment.OriginalName, mimeExtension(attachment.MimeType)))
+			if err := os.WriteFile(filepath.Join(assetDirPath, assetName), attachment.Data, 0o644); err != nil {
+				return err
+			}
+			imageRefs[attachment.ID] = filepath.ToSlash(filepath.Join(assetDirName, assetName))
+		}
+	}
+	return os.WriteFile(targetPath, []byte(renderMarkdownDocument(doc.Content, imageRefs)), 0o644)
+}
+
 func (s *JournalService) importJournalExportManifest(sourceDir string, manifestPath string) (ItemResponse, error) {
 	encoded, err := os.ReadFile(manifestPath)
 	if err != nil {
@@ -699,7 +738,7 @@ func renderMarkdownBlock(node any, imageRefs map[string]string) string {
 	}
 	switch typed["type"] {
 	case "paragraph":
-		return renderMarkdownInlineNodes(contentSlice(typed["content"]), imageRefs)
+		return escapeMarkdownBlockStart(renderMarkdownInlineNodes(contentSlice(typed["content"]), imageRefs))
 	case "heading":
 		level := intAttr(typed, "level", 1)
 		if level < 1 {
@@ -770,7 +809,7 @@ func renderMarkdownInlineNodes(nodes []any, imageRefs map[string]string) string 
 		switch typed["type"] {
 		case "text":
 			text, _ := typed["text"].(string)
-			parts = append(parts, applyMarkdownMarks(escapeMarkdownText(text), typed["marks"]))
+			parts = append(parts, applyMarkdownMarks(text, typed["marks"]))
 		case "hardBreak":
 			parts = append(parts, "  \n")
 		default:
@@ -787,7 +826,7 @@ func applyMarkdownMarks(text string, marks any) string {
 	if !ok {
 		return text
 	}
-	rendered := text
+	rendered := escapeMarkdownText(text)
 	for _, markValue := range typed {
 		mark, ok := markValue.(map[string]any)
 		if !ok {
@@ -795,7 +834,7 @@ func applyMarkdownMarks(text string, marks any) string {
 		}
 		switch mark["type"] {
 		case "code":
-			rendered = "`" + text + "`"
+			rendered = markdownCodeSpan(text)
 		case "bold":
 			rendered = "**" + rendered + "**"
 		case "italic":
@@ -1493,15 +1532,135 @@ func boolAttr(node map[string]any, key string) bool {
 }
 
 func escapeMarkdownText(text string) string {
+	escaped := map[int]int{}
+	for _, delimiter := range []rune{'*', '_', '~', '`'} {
+		for start := 0; start < len(text); {
+			index := strings.IndexRune(text[start:], delimiter)
+			if index < 0 {
+				break
+			}
+			index += start
+			width := markdownDelimiterWidth(text, index, delimiter)
+			if width > 0 && markdownDelimiterCanOpen(text, index, width, delimiter) {
+				if close := findMarkdownDelimiterClose(text, index+width, width, delimiter); close >= 0 {
+					escaped[index] = width
+					escaped[close] = width
+				}
+			}
+			start = index + max(width, 1)
+		}
+	}
+	for start := 0; start < len(text); {
+		index := strings.IndexByte(text[start:], '[')
+		if index < 0 {
+			break
+		}
+		index += start
+		if close := strings.IndexByte(text[index+1:], ']'); close >= 0 {
+			close += index + 1
+			if close+1 < len(text) && text[close+1] == '(' && strings.IndexByte(text[close+2:], ')') >= 0 {
+				escaped[index] = 1
+			}
+		}
+		start = index + 1
+	}
 	var builder strings.Builder
-	for _, r := range text {
-		switch r {
-		case '\\', '`', '*', '_', '{', '}', '[', ']', '(', ')', '#', '+', '-', '!', '|', '~':
+	for index := 0; index < len(text); {
+		width := escaped[index]
+		if width > 0 {
+			for offset := 0; offset < width; offset++ {
+				builder.WriteByte('\\')
+				builder.WriteByte(text[index+offset])
+			}
+			index += width
+			continue
+		}
+		if text[index] == '\\' {
 			builder.WriteByte('\\')
 		}
-		builder.WriteRune(r)
+		builder.WriteByte(text[index])
+		index++
 	}
 	return builder.String()
+}
+
+func escapeMarkdownBlockStart(text string) string {
+	trimmed := strings.TrimLeft(text, " ")
+	prefixLength := len(text) - len(trimmed)
+	if strings.HasPrefix(trimmed, "# ") || strings.HasPrefix(trimmed, "> ") || strings.HasPrefix(trimmed, "+ ") || strings.HasPrefix(trimmed, "- ") || strings.HasPrefix(trimmed, "* ") || trimmed == "---" || trimmed == "***" || trimmed == "___" {
+		return text[:prefixLength] + "\\" + text[prefixLength:]
+	}
+	for index := 0; index < len(trimmed); index++ {
+		if trimmed[index] < '0' || trimmed[index] > '9' {
+			if index > 0 && index+1 < len(trimmed) && trimmed[index] == '.' && trimmed[index+1] == ' ' {
+				return text[:prefixLength+index] + "\\" + text[prefixLength+index:]
+			}
+			break
+		}
+	}
+	return text
+}
+
+func markdownDelimiterWidth(text string, index int, delimiter rune) int {
+	width := 0
+	for position := index; position < len(text) && rune(text[position]) == delimiter; position++ {
+		width++
+	}
+	if delimiter == '~' {
+		if width < 2 {
+			return 0
+		}
+		return 2
+	}
+	if delimiter == '`' {
+		return width
+	}
+	if width > 3 {
+		return 3
+	}
+	return width
+}
+
+func markdownDelimiterCanOpen(text string, index, width int, delimiter rune) bool {
+	if index+width >= len(text) || isMarkdownSpace(text[index+width]) {
+		return false
+	}
+	if delimiter == '_' && index > 0 && isMarkdownWord(text[index-1]) && isMarkdownWord(text[index+width]) {
+		return false
+	}
+	return true
+}
+
+func findMarkdownDelimiterClose(text string, start, width int, delimiter rune) int {
+	for index := start; index < len(text); index++ {
+		if rune(text[index]) != delimiter || markdownDelimiterWidth(text, index, delimiter) < width || index == 0 || isMarkdownSpace(text[index-1]) {
+			continue
+		}
+		if delimiter == '_' && index+width < len(text) && isMarkdownWord(text[index-1]) && isMarkdownWord(text[index+width]) {
+			continue
+		}
+		return index
+	}
+	return -1
+}
+
+func isMarkdownSpace(value byte) bool { return value == ' ' || value == '\t' || value == '\n' }
+func isMarkdownWord(value byte) bool {
+	return value >= 'a' && value <= 'z' || value >= 'A' && value <= 'Z' || value >= '0' && value <= '9'
+}
+
+func markdownCodeSpan(text string) string {
+	maxRun, run := 0, 0
+	for _, value := range text {
+		if value == '`' {
+			run++
+			maxRun = max(maxRun, run)
+		} else {
+			run = 0
+		}
+	}
+	delimiter := strings.Repeat("`", maxRun+1)
+	return delimiter + text + delimiter
 }
 
 func plainText(value any) string {

@@ -118,6 +118,7 @@ type BackendAPI = {
   TrashItem: (command: TrashItemCommand) => Promise<TreeResponse>
   DeleteJournal: (id: string) => Promise<TreeResponse>
   OpenDocument: (id: string) => Promise<DocumentResponse>
+  ExportDocumentMarkdown: (documentId: string) => Promise<void>
   UpdateDocumentDraft: (id: string, content: ProseMirrorDoc, version: number) => Promise<{id: string, saveState: string, version: number}>
   CreateDocumentAttachment: (documentId: string, name: string, mimeType: string, dataBase64: string) => Promise<DocumentAttachmentResponse>
   PickDocumentImage: (documentId: string) => Promise<DocumentAttachmentResponse>
@@ -172,6 +173,7 @@ function missingBackend(): BackendAPI {
     TrashItem: fail,
     DeleteJournal: fail,
     OpenDocument: fail,
+    ExportDocumentMarkdown: fail,
     UpdateDocumentDraft: fail,
     CreateDocumentAttachment: fail,
     PickDocumentImage: fail,

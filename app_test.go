@@ -365,6 +365,21 @@ func TestMigrationRecordsVersionAndFailsCleanlyForInvalidSchema(t *testing.T) {
 	}
 }
 
+func TestMarkdownExportUsesMinimalEscaping(t *testing.T) {
+	if got, want := escapeMarkdownText(`Plan + notes #1 (draft) {ready} | final`), `Plan + notes #1 (draft) {ready} | final`; got != want {
+		t.Fatalf("ordinary punctuation was escaped: got %q want %q", got, want)
+	}
+	if got, want := escapeMarkdownText(`*literal emphasis* and [literal link](https://example.com)`), `\*literal emphasis\* and \[literal link](https://example.com)`; got != want {
+		t.Fatalf("markdown delimiters were not preserved as literal text: got %q want %q", got, want)
+	}
+	if got, want := escapeMarkdownBlockStart(`# literal heading`), `\# literal heading`; got != want {
+		t.Fatalf("block marker was not escaped: got %q want %q", got, want)
+	}
+	if got, want := markdownCodeSpan("cost * 2"), "`cost * 2`"; got != want {
+		t.Fatalf("code span was escaped unnecessarily: got %q want %q", got, want)
+	}
+}
+
 func TestLargeLibraryTreeBuildsWithStableCounts(t *testing.T) {
 	service := newTestService(t)
 	tree, err := service.GetLibraryTree()
