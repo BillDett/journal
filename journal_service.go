@@ -35,6 +35,10 @@ type JournalService struct {
 	mu               sync.Mutex
 	operationMu      sync.Mutex
 	cryptoMu         sync.Mutex
+	cloudMu          sync.Mutex
+	cloudWriteMu     sync.RWMutex
+	cloudBusy        bool
+	cloudCredentials *cloudCredentials
 	pending          map[string]pendingDraft
 	lastDraftVersion map[string]int64
 	masterKey        []byte
@@ -62,5 +66,6 @@ func OpenJournalService(path string) (*JournalService, error) {
 }
 
 func (s *JournalService) Close() error {
+	s.clearCloudCredentials()
 	return s.repository.Close()
 }

@@ -1,7 +1,10 @@
 package main
 
 import (
+	"context"
 	"database/sql"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -144,6 +147,111 @@ func TestBootstrapCreatesTrashAndSettings(t *testing.T) {
 	}
 	if err := rows.Err(); err != nil {
 		t.Fatalf("documents schema rows: %v", err)
+	}
+}
+
+func TestCloudCredentialsUseMasterPasswordWithoutUnlockingJournals(t *testing.T) {
+	service := newTestService(t)
+	if err := service.CreateMasterPassword("cloud password"); err != nil {
+		t.Fatalf("create master password: %v", err)
+	}
+	key, err := service.verifyMasterPassword("cloud password")
+	if err != nil {
+		t.Fatalf("verify master password: %v", err)
+	}
+	payload, err := json.Marshal(cloudCredentials{AccessKeyID: "key", SecretAccessKey: "secret"})
+	if err != nil {
+		t.Fatalf("encode credentials: %v", err)
+	}
+	nonce, ciphertext, err := sealDetached(key, payload, []byte(cloudCredentialAD))
+	if err != nil {
+		t.Fatalf("seal credentials: %v", err)
+	}
+	zeroBytes(key)
+	now := nowString()
+	if _, err := service.db.Exec(`INSERT INTO cloud_backup_config (id, endpoint_url, bucket, region, prefix, force_path_style, display_name, credential_nonce, credential_ciphertext, validated_at, created_at, updated_at) VALUES (1, ?, ?, ?, '', 0, '', ?, ?, ?, ?, ?)`, "https://s3.example.test", "bucket", "test-region", nonce, ciphertext, now, now, now); err != nil {
+		t.Fatalf("insert cloud configuration: %v", err)
+	}
+	if err := service.LockEncryption(); err != nil {
+		t.Fatalf("lock journals: %v", err)
+	}
+	_, credentialsValue, err := service.cloudConfigAndCredentials("cloud password")
+	if err != nil {
+		t.Fatalf("cloud credentials should not depend on Journal unlock state: %v", err)
+	}
+	if credentialsValue.SecretAccessKey != "secret" {
+		t.Fatalf("unexpected credential after cloud decrypt: %#v", credentialsValue)
+	}
+	status, err := service.UnlockCloudBackupCredentials("cloud password")
+	if err != nil || !status.CredentialsReady {
+		t.Fatalf("unlock cloud credentials: %#v / %v", status, err)
+	}
+	if err := service.LockEncryption(); err != nil {
+		t.Fatalf("lock journals after cloud credential unlock: %v", err)
+	}
+	_, credentialsValue, err = service.cloudConfigAndSession()
+	if err != nil || credentialsValue.AccessKeyID != "key" {
+		t.Fatalf("cloud session should survive Journal lock, got %#v / %v", credentialsValue, err)
+	}
+	if err := service.ChangeMasterPassword("cloud password", "new cloud password"); err != nil {
+		t.Fatalf("change master password: %v", err)
+	}
+	if _, _, err := service.cloudConfigAndCredentials("cloud password"); !errors.Is(err, ErrInvalidMasterPassword) {
+		t.Fatalf("expected old cloud password to fail, got %v", err)
+	}
+	_, credentialsValue, err = service.cloudConfigAndCredentials("new cloud password")
+	if err != nil || credentialsValue.AccessKeyID != "key" {
+		t.Fatalf("expected rewrapped cloud credentials, got %#v / %v", credentialsValue, err)
+	}
+}
+
+func TestCloudBackupDirtyStateTracksPermanentDeletion(t *testing.T) {
+	service := newTestService(t)
+	document, err := service.CreateDocument("")
+	if err != nil {
+		t.Fatalf("create document: %v", err)
+	}
+	if _, err := service.TrashItem(TrashItemCommand{ID: document.ID}); err != nil {
+		t.Fatalf("move document to trash: %v", err)
+	}
+	now := nowString()
+	if _, err := service.db.Exec(`INSERT INTO cloud_backup_config
+		(id, endpoint_url, bucket, region, prefix, force_path_style, display_name, credential_nonce, credential_ciphertext, validated_at, last_backup_at, created_at, updated_at)
+		VALUES (1, 'https://s3.example.test', 'bucket', 'region', '', 0, '', X'00', X'00', ?, ?, ?, ?)`, now, now, now, now); err != nil {
+		t.Fatalf("insert cloud configuration: %v", err)
+	}
+	if _, err := service.db.Exec(`UPDATE cloud_backup_state SET last_backup_generation = change_generation WHERE id = 1`); err != nil {
+		t.Fatalf("mark initial backup generation: %v", err)
+	}
+	config, err := service.loadCloudBackupConfig()
+	if err != nil {
+		t.Fatalf("load cloud configuration: %v", err)
+	}
+	if service.cloudBackupUnsynced(config) {
+		t.Fatal("expected cloud backup to start clean")
+	}
+	if _, err := service.TrashItem(TrashItemCommand{ID: document.ID, ExpectedInTrash: true}); err != nil {
+		t.Fatalf("permanently delete document: %v", err)
+	}
+	if !service.cloudBackupUnsynced(config) {
+		t.Fatal("permanent deletion must mark the cloud backup dirty")
+	}
+}
+
+func TestCloudSyncRejectsCleanLocalDatabase(t *testing.T) {
+	service := newTestService(t)
+	now := nowString()
+	if _, err := service.db.Exec(`INSERT INTO cloud_backup_config
+		(id, endpoint_url, bucket, region, prefix, force_path_style, display_name, credential_nonce, credential_ciphertext, validated_at, last_manifest_token, last_backup_at, created_at, updated_at)
+		VALUES (1, 'https://s3.example.test', 'bucket', 'region', '', 0, '', X'00', X'00', ?, 'etag', ?, ?, ?)`, now, now, now, now); err != nil {
+		t.Fatalf("insert cloud configuration: %v", err)
+	}
+	if _, err := service.db.Exec(`UPDATE cloud_backup_state SET last_backup_generation = change_generation WHERE id = 1`); err != nil {
+		t.Fatalf("mark initial backup generation: %v", err)
+	}
+	service.setCloudCredentials(cloudCredentials{AccessKeyID: "key", SecretAccessKey: "secret"})
+	if _, err := service.SyncCloudBackup(context.Background()); !errors.Is(err, ErrCloudBackupNothingToSync) {
+		t.Fatalf("expected clean database sync to be rejected, got %v", err)
 	}
 }
 
@@ -345,8 +453,8 @@ func TestMigrationRecordsVersionAndFailsCleanlyForInvalidSchema(t *testing.T) {
 	if err := service.db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil {
 		t.Fatalf("read schema version: %v", err)
 	}
-	if version != 1 {
-		t.Fatalf("expected schema version 1, got %d", version)
+	if version != schemaMigrations[len(schemaMigrations)-1].Version {
+		t.Fatalf("expected current schema version, got %d", version)
 	}
 
 	path := filepath.Join(t.TempDir(), "invalid.db")

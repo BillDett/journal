@@ -93,6 +93,38 @@ export type JournalDatabaseLocationResponse = {
   canReveal: boolean
 }
 
+export type CloudBackupEndpointCommand = {
+  endpointUrl: string
+  bucket: string
+  region: string
+  prefix: string
+  forcePathStyle: boolean
+  displayName: string
+  accessKeyId: string
+  secretAccessKey: string
+  sessionToken: string
+  masterPassword: string
+}
+
+export type CloudBackupStatusResponse = {
+  configured: boolean
+  validated: boolean
+  endpointUrl: string
+  bucket: string
+  region: string
+  prefix: string
+  forcePathStyle: boolean
+  displayName: string
+  lastBackupAt: string
+  lastRemoteAt: string
+  lastSnapshotId: string
+  lastManifestToken: string
+  lastError: string
+  unsynced: boolean
+  busy: boolean
+  credentialsReady: boolean
+}
+
 export type TrashItemCommand = {
   id: string
   expectedInTrash: boolean
@@ -148,6 +180,13 @@ type BackendAPI = {
   RevealJournalDatabaseFile: () => Promise<void>
   GetAppSettings: () => Promise<AppSettingsResponse>
   UpdateAppSettings: (settings: AppSettingsPatch) => Promise<AppSettingsResponse>
+  GetCloudBackupStatus: () => Promise<CloudBackupStatusResponse>
+  GetCloudBackupStatusAfterFlush: () => Promise<CloudBackupStatusResponse>
+  ConfigureCloudBackup: (command: CloudBackupEndpointCommand) => Promise<CloudBackupStatusResponse>
+  UnlockCloudBackupCredentials: (masterPassword: string) => Promise<CloudBackupStatusResponse>
+  SyncCloudBackup: () => Promise<CloudBackupStatusResponse>
+  RestoreCloudBackup: (masterPassword: string) => Promise<void>
+  DisconnectCloudBackup: () => Promise<void>
 }
 
 type WailsWindow = Window & {
@@ -208,6 +247,13 @@ function missingBackend(): BackendAPI {
     RevealJournalDatabaseFile: fail,
     GetAppSettings: fail,
     UpdateAppSettings: fail,
+    GetCloudBackupStatus: fail,
+    GetCloudBackupStatusAfterFlush: fail,
+    ConfigureCloudBackup: fail,
+    UnlockCloudBackupCredentials: fail,
+    SyncCloudBackup: fail,
+    RestoreCloudBackup: fail,
+    DisconnectCloudBackup: fail,
   }
 }
 

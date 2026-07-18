@@ -105,6 +105,38 @@ type JournalDatabaseLocationResponse struct {
 	CanReveal bool   `json:"canReveal"`
 }
 
+type CloudBackupEndpointCommand struct {
+	EndpointURL     string `json:"endpointUrl"`
+	Bucket          string `json:"bucket"`
+	Region          string `json:"region"`
+	Prefix          string `json:"prefix"`
+	ForcePathStyle  bool   `json:"forcePathStyle"`
+	DisplayName     string `json:"displayName"`
+	AccessKeyID     string `json:"accessKeyId"`
+	SecretAccessKey string `json:"secretAccessKey"`
+	SessionToken    string `json:"sessionToken"`
+	MasterPassword  string `json:"masterPassword"`
+}
+
+type CloudBackupStatusResponse struct {
+	Configured        bool   `json:"configured"`
+	Validated         bool   `json:"validated"`
+	EndpointURL       string `json:"endpointUrl"`
+	Bucket            string `json:"bucket"`
+	Region            string `json:"region"`
+	Prefix            string `json:"prefix"`
+	ForcePathStyle    bool   `json:"forcePathStyle"`
+	DisplayName       string `json:"displayName"`
+	LastBackupAt      string `json:"lastBackupAt"`
+	LastRemoteAt      string `json:"lastRemoteAt"`
+	LastSnapshotID    string `json:"lastSnapshotId"`
+	LastManifestToken string `json:"lastManifestToken"`
+	LastError         string `json:"lastError"`
+	Unsynced          bool   `json:"unsynced"`
+	Busy              bool   `json:"busy"`
+	CredentialsReady  bool   `json:"credentialsReady"`
+}
+
 // TrashItemCommand makes the destructive state transition explicit. The
 // expected state prevents a stale or repeated client request from escalating a
 // reversible move into permanent deletion.

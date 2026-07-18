@@ -15,12 +15,16 @@ func (s *JournalService) StartAutosave(ctx context.Context) {
 		for {
 			select {
 			case <-ctx.Done():
+				s.cloudWriteMu.RLock()
 				_ = s.FlushAll()
+				s.cloudWriteMu.RUnlock()
 				return
 			case <-ticker.C:
+				s.cloudWriteMu.RLock()
 				for _, id := range s.pendingIDsOlderThan(s.autosaveInterval()) {
 					_, _ = s.FlushDocument(id)
 				}
+				s.cloudWriteMu.RUnlock()
 			}
 		}
 	}()

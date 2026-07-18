@@ -110,6 +110,66 @@ func (s *JournalService) migrateV1() error {
 	return s.ensureSetting(settingLastDocumentID, "")
 }
 
+func (s *JournalService) migrateV2() error {
+	_, err := s.db.Exec(`CREATE TABLE IF NOT EXISTS cloud_backup_config (
+		id INTEGER PRIMARY KEY CHECK (id = 1),
+		endpoint_url TEXT NOT NULL,
+		bucket TEXT NOT NULL,
+		region TEXT NOT NULL,
+		prefix TEXT NOT NULL DEFAULT '',
+		force_path_style INTEGER NOT NULL DEFAULT 0,
+		display_name TEXT NOT NULL DEFAULT '',
+		credential_nonce BLOB NOT NULL,
+		credential_ciphertext BLOB NOT NULL,
+		validated_at TEXT NULL,
+		last_manifest_token TEXT NULL,
+		last_snapshot_id TEXT NULL,
+		last_snapshot_sha256 TEXT NULL,
+		last_snapshot_size INTEGER NULL,
+		last_backup_at TEXT NULL,
+		last_remote_at TEXT NULL,
+		last_error TEXT NULL,
+		created_at TEXT NOT NULL,
+		updated_at TEXT NOT NULL
+	)`)
+	return err
+}
+
+// migrateV3 records content mutations independently from row timestamps. A
+// timestamp scan cannot observe a deletion because the changed row is gone.
+func (s *JournalService) migrateV3() error {
+	return ensureCloudBackupState(s.db)
+}
+
+func ensureCloudBackupState(db execer) error {
+	statements := []string{
+		`CREATE TABLE IF NOT EXISTS cloud_backup_state (
+			id INTEGER PRIMARY KEY CHECK (id = 1),
+			change_generation INTEGER NOT NULL DEFAULT 0,
+			last_backup_generation INTEGER NULL
+		)`,
+		`INSERT OR IGNORE INTO cloud_backup_state (id, change_generation, last_backup_generation) VALUES (1, 0, NULL)`,
+	}
+	for _, statement := range statements {
+		if _, err := db.Exec(statement); err != nil {
+			return err
+		}
+	}
+	for _, table := range []string{"items", "documents", "document_attachments", "app_settings", "encryption_master", "journal_encryption_keys"} {
+		for _, event := range []string{"INSERT", "UPDATE", "DELETE"} {
+			name := "cloud_backup_generation_" + table + "_" + strings.ToLower(event)
+			statement := fmt.Sprintf(`CREATE TRIGGER IF NOT EXISTS %s AFTER %s ON %s
+				BEGIN
+					UPDATE cloud_backup_state SET change_generation = change_generation + 1 WHERE id = 1;
+				END`, name, event, table)
+			if _, err := db.Exec(statement); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
 func (s *JournalService) ensureTrash() error {
 	var id string
 	err := s.db.QueryRow(`SELECT id FROM items WHERE system_key = ?`, SystemTrash).Scan(&id)

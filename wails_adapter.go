@@ -32,6 +32,18 @@ type App struct {
 	allowClose            bool
 }
 
+// lockCloudWrite makes the RPC boundary honor Cloud Backup's read-only phase.
+// Cloud operations take the matching exclusive lock while they flush and stage
+// a snapshot, so an already-started write finishes before the snapshot and a
+// later write waits until it is safe to proceed.
+func (a *App) lockCloudWrite() func() {
+	if a.service == nil {
+		return func() {}
+	}
+	a.service.cloudWriteMu.RLock()
+	return a.service.cloudWriteMu.RUnlock
+}
+
 func NewApp() *App {
 	return &App{}
 }
@@ -127,38 +139,49 @@ func (a *App) GetJournalDetails(journalID string) (JournalDetailsResponse, error
 }
 
 func (a *App) CreateDocument(parentID string) (DocumentResponse, error) {
+	defer a.lockCloudWrite()()
 	return a.commands.documents.Create(parentID)
 }
 
 func (a *App) DuplicateDocument(id string) (DocumentResponse, error) {
+	defer a.lockCloudWrite()()
 	return a.commands.documents.Duplicate(id)
 }
 
 func (a *App) CreateFolder(parentID string, title string) (ItemResponse, error) {
+	defer a.lockCloudWrite()()
 	return a.commands.library.CreateFolder(parentID, title)
 }
 
 func (a *App) CreateJournal(title string) (ItemResponse, error) {
+	defer a.lockCloudWrite()()
 	return a.commands.library.CreateJournal(title)
 }
 
 func (a *App) RenameItem(id string, title string) (ItemResponse, error) {
+	defer a.lockCloudWrite()()
 	return a.commands.library.RenameItem(id, title)
 }
 
 func (a *App) MoveItem(id string, newParentID string, newSortOrder int) (TreeResponse, error) {
+	defer a.lockCloudWrite()()
 	return a.commands.library.MoveItem(id, newParentID, newSortOrder)
 }
 
 func (a *App) TrashItem(command TrashItemCommand) (TreeResponse, error) {
+	defer a.lockCloudWrite()()
 	return a.commands.library.TrashItem(command)
 }
 
 func (a *App) DeleteJournal(id string) (TreeResponse, error) {
+	defer a.lockCloudWrite()()
 	return a.commands.library.DeleteJournal(id)
 }
 
-func (a *App) EmptyTrash() (TreeResponse, error) { return a.commands.library.EmptyTrash() }
+func (a *App) EmptyTrash() (TreeResponse, error) {
+	defer a.lockCloudWrite()()
+	return a.commands.library.EmptyTrash()
+}
 
 func (a *App) OpenDocument(id string) (DocumentResponse, error) {
 	return a.commands.documents.Open(id)
@@ -184,10 +207,12 @@ func (a *App) ExportDocumentMarkdown(documentID string) error {
 }
 
 func (a *App) UpdateDocumentDraft(id string, content map[string]any, version int64) (DocumentDraftResponse, error) {
+	defer a.lockCloudWrite()()
 	return a.commands.documents.UpdateDraft(id, content, version)
 }
 
 func (a *App) CreateDocumentAttachment(documentID string, name string, mimeType string, dataBase64 string) (DocumentAttachmentResponse, error) {
+	defer a.lockCloudWrite()()
 	return a.commands.documents.CreateAttachment(documentID, name, mimeType, dataBase64)
 }
 
@@ -208,6 +233,7 @@ func (a *App) PickDocumentImage(documentID string) (DocumentAttachmentResponse, 
 	if strings.TrimSpace(path) == "" {
 		return DocumentAttachmentResponse{}, nil
 	}
+	defer a.lockCloudWrite()()
 	return a.commands.documents.CreateAttachmentFromPath(documentID, path)
 }
 
@@ -216,10 +242,12 @@ func (a *App) GetDocumentAttachmentDataURL(attachmentID string) (DocumentAttachm
 }
 
 func (a *App) UpdateDocumentSpacing(id string, spacingPreset string) (DocumentSaveResponse, error) {
+	defer a.lockCloudWrite()()
 	return a.commands.documents.UpdateSpacing(id, spacingPreset)
 }
 
 func (a *App) FlushDocument(id string) (DocumentSaveResponse, error) {
+	defer a.lockCloudWrite()()
 	return a.commands.documents.Flush(id)
 }
 
@@ -232,6 +260,7 @@ func (a *App) GetEncryptionStatus() (EncryptionStatusResponse, error) {
 }
 
 func (a *App) CreateMasterPassword(password string) error {
+	defer a.lockCloudWrite()()
 	return a.commands.encryption.CreateMasterPassword(password)
 }
 
@@ -243,6 +272,7 @@ func (a *App) UnlockEncryption(password string) (EncryptionStatusResponse, error
 }
 
 func (a *App) ChangeMasterPassword(currentPassword string, newPassword string) (EncryptionStatusResponse, error) {
+	defer a.lockCloudWrite()()
 	if err := a.commands.encryption.ChangeMasterPassword(currentPassword, newPassword); err != nil {
 		return EncryptionStatusResponse{}, err
 	}
@@ -250,14 +280,17 @@ func (a *App) ChangeMasterPassword(currentPassword string, newPassword string) (
 }
 
 func (a *App) EncryptJournal(journalID string) (TreeResponse, error) {
+	defer a.lockCloudWrite()()
 	return a.commands.encryption.EncryptJournal(journalID)
 }
 
 func (a *App) DecryptJournal(journalID string) (TreeResponse, error) {
+	defer a.lockCloudWrite()()
 	return a.commands.encryption.DecryptJournal(journalID)
 }
 
 func (a *App) LockEncryptedJournals() (EncryptionStatusResponse, error) {
+	defer a.lockCloudWrite()()
 	if err := a.commands.encryption.Lock(); err != nil {
 		return EncryptionStatusResponse{}, err
 	}
@@ -292,7 +325,65 @@ func (a *App) RevealJournalDatabaseFile() error {
 }
 
 func (a *App) UpdateAppSettings(settings AppSettingsPatch) (AppSettingsResponse, error) {
+	defer a.lockCloudWrite()()
 	return a.commands.settings.Update(settings)
+}
+
+func (a *App) GetCloudBackupStatus() (CloudBackupStatusResponse, error) {
+	return a.commands.cloud.Status()
+}
+
+func (a *App) GetCloudBackupStatusAfterFlush() (CloudBackupStatusResponse, error) {
+	defer a.lockCloudWrite()()
+	if err := a.service.FlushAll(); err != nil {
+		return CloudBackupStatusResponse{}, err
+	}
+	return a.commands.cloud.Status()
+}
+
+func (a *App) ConfigureCloudBackup(command CloudBackupEndpointCommand) (CloudBackupStatusResponse, error) {
+	if a.ctx == nil {
+		return CloudBackupStatusResponse{}, fmt.Errorf("app is not ready")
+	}
+	defer a.lockCloudWrite()()
+	return a.commands.cloud.Configure(a.ctx, command)
+}
+
+func (a *App) UnlockCloudBackupCredentials(masterPassword string) (CloudBackupStatusResponse, error) {
+	return a.commands.cloud.UnlockCredentials(masterPassword)
+}
+
+func (a *App) SyncCloudBackup() (CloudBackupStatusResponse, error) {
+	if a.ctx == nil {
+		return CloudBackupStatusResponse{}, fmt.Errorf("app is not ready")
+	}
+	return a.commands.cloud.Sync(a.ctx)
+}
+
+func (a *App) RestoreCloudBackup(masterPassword string) error {
+	if a.ctx == nil {
+		return fmt.Errorf("app is not ready")
+	}
+	if _, err := a.commands.cloud.Restore(a.ctx, masterPassword); err != nil {
+		return err
+	}
+	_, _ = runtime.MessageDialog(a.ctx, runtime.MessageDialogOptions{
+		Type:          runtime.InfoDialog,
+		Title:         "Cloud Backup Restored",
+		Message:       "The cloud backup is now the local Journal database. Journal will close; reopen it to continue.",
+		Buttons:       []string{"Close Journal"},
+		DefaultButton: "Close Journal",
+	})
+	a.closeMu.Lock()
+	a.allowClose = true
+	a.closeMu.Unlock()
+	runtime.Quit(a.ctx)
+	return nil
+}
+
+func (a *App) DisconnectCloudBackup() error {
+	defer a.lockCloudWrite()()
+	return a.commands.cloud.Disconnect()
 }
 
 func (a *App) GetAppInfo() AppInfo {

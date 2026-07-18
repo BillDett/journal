@@ -75,9 +75,12 @@ credentials. If the user selects Configure Cloud Backup without one, Journal
 prompts them to create a master password before continuing. This does not
 require an encrypted Journal to exist.
 
-Cloud Backup and encrypted-Journal unlocking are separate states. A backup or
-restore operation may prompt for the master password to decrypt its credential
-record, but it must not unlock encrypted Journals or reveal their contents.
+Cloud Backup and encrypted-Journal unlocking are separate states. Endpoint
+setup saves the encrypted credential record but does not start a Cloud Backup
+session. The first **Sync Now** after Journal opens asks for the master password
+and decrypts the credentials into a Cloud Backup-only in-memory session;
+subsequent syncs use that session without prompting again. The session must not
+unlock encrypted Journals or reveal their contents.
 
 Actions:
 
@@ -178,8 +181,8 @@ object.
 ```
 
 The S3 version token for `current.json` is retained in `journal.db` as part of
-the Cloud Backup configuration and supplied as the conditional-write
-precondition for the next upload.
+the Cloud Backup configuration. Before publishing a new manifest, Journal
+compares the currently observed token with this value and stops on a mismatch.
 
 ### 5.2 Retention
 
@@ -203,26 +206,30 @@ separate encrypted record.
 
 Cloud Backup requires a configured master password. Endpoint credentials are
 sealed with the same master-password cryptography used for encrypted Journal
-material, using a Cloud Backup-specific domain/key context. Cloud operations
-may prompt for the master password to decrypt this record into a separate,
-short-lived Cloud Backup credential state. This must not unlock encrypted
-Journals. Conversely, **Lock Journals** clears Journal encryption keys only;
-it must not clear Cloud Backup credentials or disable cloud operations.
+material, using a Cloud Backup-specific domain/key context. Endpoint setup
+saves that record. The first sync after Journal starts decrypts it into a
+separate, in-memory Cloud Backup credential state; later syncs use that state
+without prompting again. This must not unlock encrypted Journals. Conversely,
+**Lock Journals** clears Journal encryption keys only; it must not clear Cloud
+Backup credentials or disable cloud operations. The in-memory Cloud Backup
+state is cleared when the app exits or the endpoint is changed or disconnected.
 
 The configured S3 principal needs only `GetObject`, `PutObject`, and
 `HeadObject` under the configured prefix. Bucket-wide listing, delete, or
 administrative permissions are not required.
 
 Bucket versioning is strongly recommended when the endpoint supports it. The
-protocol still publishes immutable snapshots and conditionally updates the
-manifest; versioning provides a provider-side recovery path for an accidental
-manifest overwrite.
+protocol still publishes immutable snapshots and uses an optimistic manifest
+version check; versioning provides a provider-side recovery path for an
+accidental manifest overwrite.
 
-The S3 adapter uses SHA-256 checksums for snapshot uploads and verifies object
-size/checksum metadata before publishing the manifest. It uses an opaque object
-version identifier for conditional `current.json` updates. If an endpoint
-cannot perform the required conditional update, Journal must reject it rather
-than fall back to last-writer-wins behavior.
+The S3 adapter calculates SHA-256 for every snapshot and verifies the uploaded
+object's exact size and digest by reading it back before publishing the
+manifest. Provider checksum metadata may be used when available, but is not
+required; this keeps the protocol compatible with services such as Backblaze
+B2 that do not implement every newer S3 checksum header. It uses an opaque
+object version identifier to detect a changed `current.json` before publishing
+the next backup.
 
 The internal storage boundary is deliberately narrow:
 
@@ -233,17 +240,17 @@ type S3BackupStore interface {
     PutImmutable(ctx context.Context, endpoint S3BackupEndpoint, key string, source io.Reader, sha256 string) (S3ObjectMeta, error)
     HeadObject(ctx context.Context, endpoint S3BackupEndpoint, key string) (S3ObjectMeta, error)
     GetCurrent(ctx context.Context, endpoint S3BackupEndpoint) ([]byte, S3VersionToken, error)
-    PutCurrentIf(ctx context.Context, endpoint S3BackupEndpoint, value []byte, expected S3VersionToken) (S3VersionToken, error)
-    CreateCurrentIfAbsent(ctx context.Context, endpoint S3BackupEndpoint, value []byte) (S3VersionToken, error)
+    PutCurrent(ctx context.Context, endpoint S3BackupEndpoint, value []byte) (S3VersionToken, error)
 }
 ```
 
 The adapter validates HTTPS connectivity, credentials, bucket/region and
-addressing mode, prefix access, checksum support, read-after-write behavior,
-and conditional manifest replacement before the endpoint can be saved.
-Conditional manifest replacement is what prevents accidental last-writer-wins
-data loss. Endpoint validation must reject services that advertise S3
-compatibility but cannot provide the required semantics.
+addressing mode, prefix access, and read-after-write digest verification before
+the endpoint can be saved. Some S3-compatible services, including Backblaze
+B2, do not implement S3 conditional `PutObject` headers. V1 therefore detects
+a changed manifest before upload using its recorded version token but does not
+claim atomic multi-writer coordination. Cloud Backup remains a single-writer,
+deliberately initiated snapshot feature.
 
 ## 7. Safe upload protocol
 
@@ -260,8 +267,7 @@ compatibility but cannot provide the required semantics.
 9. Upload the staged snapshot to a new immutable key.
 10. Read it back or otherwise verify the provider-reported size and digest.
 11. Create a new manifest referring to the staged snapshot.
-12. Conditionally publish `current.json` using the token read in step 7, or
-    conditionally create it when no manifest exists.
+12. Publish `current.json` only after the token check in step 8 succeeds.
 13. Read and validate the published manifest.
 14. Persist the new manifest token, snapshot ID, digest, and sync time in
     `journal.db`.
@@ -276,7 +282,9 @@ cleaned up later.
 Cloud Backup never merges two SQLite files.
 
 When the remote manifest changed since the local installation last synced and
-the local database contains changes, automatic upload stops. The UI offers:
+the local database contains changes, automatic upload stops. This detects
+ordinary multi-device conflicts before an upload; it is not an atomic
+multi-writer lock. The UI offers:
 
 - **Restore remote backup**: first make a local recovery copy, then replace
   the local database with the remote snapshot.
@@ -383,7 +391,7 @@ available. A newer app may migrate an older restored snapshot normally.
 2. Define the provider contract and implement a single provider adapter.
 3. Implement SQLite staged snapshot, integrity, digest, and atomic replacement
    utilities.
-4. Implement manifest parsing, conditional publication, and remote validation.
+4. Implement manifest parsing, optimistic conflict detection, publication, and remote validation.
 5. Add backup status and Settings UI.
 6. Add the read-only operation guard and close-time decision flow.
 7. Add restore/recovery UI and tests for interrupted and invalid snapshots.

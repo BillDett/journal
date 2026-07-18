@@ -12,6 +12,8 @@ type SchemaMigration struct {
 
 var schemaMigrations = []SchemaMigration{
 	{Version: 1, Name: "initial library, search, encryption, and attachments", Apply: (*JournalService).migrateV1},
+	{Version: 2, Name: "cloud backup configuration and sync state", Apply: (*JournalService).migrateV2},
+	{Version: 3, Name: "cloud backup durable change generation", Apply: (*JournalService).migrateV3},
 }
 
 func (s *JournalService) migrate() error {

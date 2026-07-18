@@ -210,6 +210,10 @@ func (s *JournalService) ChangeMasterPassword(currentPassword string, newPasswor
 	if err != nil {
 		return err
 	}
+	cloudNonce, cloudCiphertext, hasCloudCredentials, err := s.rewrapCloudBackupCredentials(oldKey, newKey)
+	if err != nil {
+		return err
+	}
 
 	tx, err := s.db.Begin()
 	if err != nil {
@@ -238,6 +242,11 @@ func (s *JournalService) ChangeMasterPassword(currentPassword string, newPasswor
 			 WHERE key_id = ?`,
 			nonce, ciphertext, now, row.KeyID,
 		); err != nil {
+			return err
+		}
+	}
+	if hasCloudCredentials {
+		if _, err := tx.Exec(`UPDATE cloud_backup_config SET credential_nonce = ?, credential_ciphertext = ?, updated_at = ? WHERE id = 1`, cloudNonce, cloudCiphertext, now); err != nil {
 			return err
 		}
 	}

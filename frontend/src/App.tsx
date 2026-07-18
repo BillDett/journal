@@ -46,6 +46,8 @@ import {
   api,
   messageFromError,
   type AppInfo,
+  type CloudBackupEndpointCommand,
+  type CloudBackupStatusResponse,
   type DocumentResponse,
   type EncryptionStatusResponse,
   type JournalDetailsResponse,
@@ -91,6 +93,8 @@ type EncryptionDialogState =
   | {mode: 'change'}
   | null
 
+type CloudPasswordAction = 'restore' | 'sync' | 'sync-and-quit' | null
+
 function App() {
   const [tree, setTree] = useState<TreeItem[]>([])
   const [trashId, setTrashId] = useState('')
@@ -127,6 +131,15 @@ function App() {
     unlocked: false,
     encryptedJournalIds: [],
   })
+  const [cloudBackup, setCloudBackup] = useState<CloudBackupStatusResponse>({
+    configured: false, validated: false, endpointUrl: '', bucket: '', region: '', prefix: '', forcePathStyle: false,
+    displayName: '', lastBackupAt: '', lastRemoteAt: '', lastSnapshotId: '', lastManifestToken: '', lastError: '', unsynced: false, busy: false, credentialsReady: false,
+  })
+  const [cloudConfigOpen, setCloudConfigOpen] = useState(false)
+  const [cloudConfigureAfterMasterPassword, setCloudConfigureAfterMasterPassword] = useState(false)
+  const [cloudPasswordAction, setCloudPasswordAction] = useState<CloudPasswordAction>(null)
+  const [cloudRestoreConfirm, setCloudRestoreConfirm] = useState(false)
+  const [closeSyncPrompt, setCloseSyncPrompt] = useState(false)
   const [libraryWidth, setLibraryWidth] = useState(libraryWidthDefault)
   const autosaveTimer = useRef<number | undefined>(undefined)
   const operationCoordinator = useRef(new OperationCoordinator())
@@ -195,7 +208,7 @@ function App() {
     if (!('runtime' in window)) return undefined
     return EventsOn('journal:before-close', () => {
       if (activeDoc && !settingsOpen && !journalDetails) setCloseRequest((current) => current + 1)
-      else void api.CompleteCloseAfterFlush()
+      else void completeCloseAfterFlush()
     })
   }, [activeDoc, journalDetails, settingsOpen])
 
@@ -204,7 +217,7 @@ function App() {
     const requestVersion = operationCoordinator.current.nextTreeRequest()
     async function boot() {
       try {
-        const [treeResponse, settings, info, encryption, location] = await Promise.all([api.GetLibraryTree(), api.GetAppSettings(), api.GetAppInfo(), api.GetEncryptionStatus(), api.GetJournalDatabaseLocation()])
+        const [treeResponse, settings, info, encryption, location, cloud] = await Promise.all([api.GetLibraryTree(), api.GetAppSettings(), api.GetAppInfo(), api.GetEncryptionStatus(), api.GetJournalDatabaseLocation(), api.GetCloudBackupStatus()])
         if (!live) return
         if (operationCoordinator.current.isCurrentTreeRequest(requestVersion)) applyTree(treeResponse.items, treeResponse.trashId)
         setAutosaveInterval(settings.autosaveIntervalMs)
@@ -212,6 +225,7 @@ function App() {
         setAppInfo(info)
         setEncryptionStatus(encryption)
         setDatabaseLocation(location)
+        setCloudBackup(cloud)
         if (settings.lastDocumentId) {
           try {
             const response = await api.OpenDocument(settings.lastDocumentId)
@@ -280,6 +294,14 @@ function App() {
     setExpanded(expandAllContainers(response.items))
   }
 
+  async function refreshCloudBackupStatus() {
+    try {
+      setCloudBackup(await api.GetCloudBackupStatus())
+    } catch (error) {
+      setLastError(messageFromError(error))
+    }
+  }
+
   function scheduleAutosaveFlush(id: string, version: number) {
     window.clearTimeout(autosaveTimer.current)
     autosaveTimer.current = window.setTimeout(() => {
@@ -303,6 +325,7 @@ function App() {
         setSaveState('saved')
         setStatus('Saved')
         void refreshVisibleTree()
+        void refreshCloudBackupStatus()
       }
     } catch (error) {
       if (activeDocId.current === id && draftVersion.current === version) {
@@ -337,6 +360,7 @@ function App() {
         setStatus('Autosave pending')
       }
       void refreshVisibleTree()
+      void refreshCloudBackupStatus()
       return true
     } catch (error) {
       setSaveState('error')
@@ -346,11 +370,16 @@ function App() {
   }
 
   async function updateActiveDraft(content: ProseMirrorDoc) {
+    if (cloudBackup.busy) return
     if (!activeDoc) return
     const id = activeDoc.id
     const version = draftVersion.current + 1
     draftVersion.current = version
     latestDraft.current = {id, content, version}
+    // Settings replaces the editor pane. Keep the active document's displayed
+    // content current as soon as a draft is queued so remounting the editor
+    // cannot show the pre-edit server snapshot while autosave is pending.
+    setActiveDoc((current) => current && current.id === id ? {...current, content} : current)
     window.clearTimeout(autosaveTimer.current)
     setSaveState('dirty')
     setStatus('Autosave pending')
@@ -370,6 +399,7 @@ function App() {
   }
 
   async function updateActiveSpacing(spacingPreset: SpacingPreset) {
+    if (cloudBackup.busy) return
     if (!activeDoc || activeDoc.spacingPreset === spacingPreset) return
     const id = activeDoc.id
     setActiveDoc((current) => current && current.id === id ? {...current, spacingPreset} : current)
@@ -378,6 +408,7 @@ function App() {
       const response = await api.UpdateDocumentSpacing(id, spacingPreset)
       setActiveDoc((current) => current && current.id === id ? {...current, updatedAt: response.updatedAt} : current)
       void refreshVisibleTree()
+      void refreshCloudBackupStatus()
     } catch (error) {
       if (activeDocId.current === id) {
         setActiveDoc((current) => current && current.id === id ? {...current, spacingPreset: activeDoc.spacingPreset} : current)
@@ -427,6 +458,7 @@ function App() {
   }
 
   async function createDocument(parentId = '') {
+    if (cloudBackup.busy) return
     if (!(await flushActive())) return
     try {
       const response = await api.CreateDocument(parentId)
@@ -438,6 +470,7 @@ function App() {
   }
 
   function requestDuplicateDocument(id: string) {
+    if (cloudBackup.busy) return
     const item = flattened.find((entry) => entry.id === id)
     if (!item || item.kind !== 'document' || isDescendantOf(flattened, id, trashId)) return
     setSelectedItemId(id)
@@ -445,6 +478,7 @@ function App() {
   }
 
   async function confirmDuplicateDocument() {
+    if (cloudBackup.busy) return
     if (!duplicateTarget) return
     const id = duplicateTarget.id
     setDuplicateTarget(null)
@@ -458,6 +492,7 @@ function App() {
   }
 
   async function createFolder(parentId = '') {
+    if (cloudBackup.busy) return
     try {
       const response = await api.CreateFolder(parentId || defaultJournalId, 'New Folder')
       await refreshVisibleTree(response.tree.items, response.tree.trashId)
@@ -471,6 +506,7 @@ function App() {
   }
 
   async function createJournal() {
+    if (cloudBackup.busy) return
     try {
       const response = await api.CreateJournal('New Journal')
       await refreshVisibleTree(response.tree.items, response.tree.trashId)
@@ -504,6 +540,7 @@ function App() {
   }
 
   async function importJournal() {
+    if (cloudBackup.busy) return
     if (!(await flushActive())) return
     try {
       const response = await api.ImportMarkdownDirectory()
@@ -529,6 +566,7 @@ function App() {
   }
 
   async function lockEncryptedJournals() {
+    if (cloudBackup.busy) return
     if (!encryptionStatus.unlocked || encryptionStatus.encryptedJournalIds.length === 0) return
     if (!(await flushActive())) return
     try {
@@ -570,6 +608,7 @@ function App() {
   }, [flushActive, encryptionStatus, activeDoc, flattened])
 
   async function emptyTrash() {
+    if (cloudBackup.busy) return
     setEmptyTrashConfirm(false)
     if (activeDoc && isDescendantOf(flattened, activeDoc.id, trashId) && !(await flushActive())) return
     try {
@@ -583,6 +622,7 @@ function App() {
   }
 
   async function renameItem(id: string, title: string) {
+    if (cloudBackup.busy) return false
     try {
       const response = await api.RenameItem(id, title)
       await refreshVisibleTree(response.tree.items, response.tree.trashId)
@@ -599,6 +639,7 @@ function App() {
   }
 
   function requestDelete(id: string) {
+    if (cloudBackup.busy) return
     const item = flattened.find((entry) => entry.id === id)
     if (!item || item.systemKey === 'trash') return
     if (item.kind === 'journal' && journalCount <= 1) return
@@ -608,6 +649,7 @@ function App() {
   }
 
   async function confirmDelete() {
+    if (cloudBackup.busy) return
     if (!deleteTarget) return
     const {item, inTrash} = deleteTarget
     const id = item.id
@@ -637,6 +679,7 @@ function App() {
   }
 
   async function moveItem(id: string, parentId: string, sortOrder = -1) {
+    if (cloudBackup.busy) return
     if (id === parentId) return
     const operationKey = `move:${id}`
     if (!beginOperation(operationKey)) return
@@ -675,6 +718,7 @@ function App() {
   }
 
   async function encryptJournal(journalId: string) {
+    if (cloudBackup.busy) return
     if (!(await flushActive())) return
     if (!encryptionStatus.masterPasswordConfigured) {
       setEncryptionDialog({mode: 'create', journalId})
@@ -698,6 +742,7 @@ function App() {
   }
 
   async function decryptJournal(journalId: string) {
+    if (cloudBackup.busy) return
     if (!encryptionStatus.unlocked) {
       setEncryptionDialog({mode: 'unlock', journalId, action: 'decrypt'})
       return
@@ -711,6 +756,7 @@ function App() {
   }
 
   async function performDecryptJournal(journalId: string) {
+    if (cloudBackup.busy) return
     const closesActive = activeDoc ? journalIdFor(flattened, activeDoc.id) === journalId : false
     if (!(await flushActive())) return
     try {
@@ -728,6 +774,7 @@ function App() {
   }
 
   async function continueEncryptionAction(dialog: NonNullable<EncryptionDialogState>) {
+    if (cloudBackup.busy) return
     if (dialog.mode === 'unlock' && dialog.journalId) {
       if (dialog.action === 'encrypt') {
         const response = await api.EncryptJournal(dialog.journalId)
@@ -747,6 +794,7 @@ function App() {
   }
 
   async function submitMasterPassword(password: string) {
+    if (cloudBackup.busy) return
     const dialog = encryptionDialog
     if (!dialog) return
     try {
@@ -765,6 +813,10 @@ function App() {
         await refreshEncryptionStatus()
         setEncryptionDialog(null)
         setStatus('Master password set')
+        if (cloudConfigureAfterMasterPassword) {
+          setCloudConfigureAfterMasterPassword(false)
+          setCloudConfigOpen(true)
+        }
       } else if (dialog.mode === 'unlock') {
         const status = await api.UnlockEncryption(password)
         setEncryptionStatus(status)
@@ -777,6 +829,7 @@ function App() {
   }
 
   async function submitMasterPasswordChange(currentPassword: string, newPassword: string) {
+    if (cloudBackup.busy) return
     if (!(await flushActive())) return
     const activeWasEncrypted = activeDoc ? encryptedJournalIds(flattened).has(journalIdFor(flattened, activeDoc.id)) : false
     try {
@@ -803,6 +856,7 @@ function App() {
   }
 
   async function updateAutosaveInterval(value: number) {
+    if (cloudBackup.busy) return
     setAutosaveInterval(value)
     try {
       const response = await api.UpdateAppSettings({autosaveIntervalMs: value, libraryWidth})
@@ -814,7 +868,99 @@ function App() {
     }
   }
 
+  function openCloudConfiguration() {
+    if (!encryptionStatus.masterPasswordConfigured) {
+      setCloudConfigureAfterMasterPassword(true)
+      setEncryptionDialog({mode: 'setup'})
+      return
+    }
+    setCloudConfigOpen(true)
+  }
+
+  async function configureCloudBackup(command: CloudBackupEndpointCommand) {
+    setCloudBackup((current) => ({...current, busy: true}))
+    try {
+      const response = await api.ConfigureCloudBackup(command)
+      setCloudBackup(response)
+      setCloudConfigOpen(false)
+      setStatus('Cloud Backup endpoint configured')
+    } catch (error) {
+      setCloudBackup((current) => ({...current, busy: false}))
+      setLastError(messageFromError(error))
+    }
+  }
+
+  function requestCloudSync() {
+    if (!cloudBackup.configured) {
+      openCloudConfiguration()
+      return
+    }
+    if (!cloudBackup.credentialsReady) {
+      setCloudPasswordAction('sync')
+      return
+    }
+    void runCloudSync()
+  }
+
+  function requestCloudRestore() {
+    if (!cloudBackup.configured) {
+      openCloudConfiguration()
+      return
+    }
+    setCloudRestoreConfirm(true)
+  }
+
+  async function runCloudPasswordAction(masterPassword: string) {
+    const action = cloudPasswordAction
+    if (!action) return
+    setCloudPasswordAction(null)
+    setCloudBackup((current) => ({...current, busy: true}))
+    try {
+      if (action === 'restore') {
+        await api.RestoreCloudBackup(masterPassword)
+        return
+      }
+      const response = await api.UnlockCloudBackupCredentials(masterPassword)
+      setCloudBackup(response)
+      await runCloudSync(action === 'sync-and-quit')
+    } catch (error) {
+      setCloudBackup((current) => ({...current, busy: false}))
+      setLastError(messageFromError(error))
+      if (action === 'sync-and-quit') void api.CancelCloseAfterFlushFailure()
+    }
+  }
+
+  async function runCloudSync(quitAfter = false) {
+    setCloudBackup((current) => ({...current, busy: true}))
+    try {
+      const response = await api.SyncCloudBackup()
+      setCloudBackup(response)
+      setStatus('Cloud Backup completed')
+      if (quitAfter) void api.CompleteCloseAfterFlush()
+    } catch (error) {
+      setCloudBackup((current) => ({...current, busy: false}))
+      setLastError(messageFromError(error))
+      if (quitAfter) void api.CancelCloseAfterFlushFailure()
+    }
+  }
+
+  async function completeCloseAfterFlush() {
+    try {
+      const response = await api.GetCloudBackupStatusAfterFlush()
+      setCloudBackup(response)
+      if (response.configured && response.unsynced) {
+        setCloseSyncPrompt(true)
+        return
+      }
+      await api.CompleteCloseAfterFlush()
+    } catch (error) {
+      setLastError(messageFromError(error))
+      void api.CancelCloseAfterFlushFailure()
+    }
+  }
+
   const persistLibraryWidth = useCallback(async (width: number) => {
+    if (cloudBackup.busy) return
     const nextWidth = clampNumber(Math.round(width), libraryWidthMin, libraryWidthMax)
     try {
       const response = await api.UpdateAppSettings({autosaveIntervalMs: autosaveInterval, libraryWidth: nextWidth})
@@ -823,7 +969,7 @@ function App() {
     } catch (error) {
       setLastError(messageFromError(error))
     }
-  }, [autosaveInterval])
+  }, [autosaveInterval, cloudBackup.busy])
 
   function beginLibraryResize(event: ReactPointerEvent<HTMLDivElement>) {
     const startX = event.clientX
@@ -851,15 +997,17 @@ function App() {
     window.addEventListener('pointercancel', onPointerUp, {once: true})
   }
 
-  const creationDisabled = Boolean(searchQuery.trim())
+  const mutationDisabled = cloudBackup.busy
+  const creationDisabled = Boolean(searchQuery.trim()) || mutationDisabled
 
   return (
-    <main className="app-shell">
+    <main className={cloudBackup.busy ? 'app-shell cloud-operation-active' : 'app-shell'}>
       <section className="main-layout" style={{'--library-width': `${libraryWidth}px`} as CSSProperties}>
         <aside
           className="library-panel"
           onDragOver={(event) => event.preventDefault()}
           onDrop={() => {
+            if (mutationDisabled) return
             if (!draggedId) return
             if (draggedItem?.kind === 'journal') void moveItem(draggedId, '', -1)
             else if (creationParentId) void moveItem(draggedId, creationParentId, -1)
@@ -913,6 +1061,7 @@ function App() {
                   draggedId={draggedId}
                   draggedItem={draggedItem}
                   creationDisabled={creationDisabled}
+                  mutationDisabled={mutationDisabled}
                   onToggle={(id) => setExpanded((current) => toggleSet(current, id))}
                   onSelect={setSelectedItemId}
                   onOpen={(id) => void openDocument(id)}
@@ -941,8 +1090,9 @@ function App() {
           aria-valuemax={libraryWidthMax}
           aria-valuenow={libraryWidth}
           tabIndex={0}
-          onPointerDown={beginLibraryResize}
+          onPointerDown={mutationDisabled ? undefined : beginLibraryResize}
           onKeyDown={(event) => {
+            if (mutationDisabled) return
             if (event.key === 'ArrowLeft') {
               const nextWidth = clampNumber(libraryWidth - 16, libraryWidthMin, libraryWidthMax)
               setLibraryWidth(nextWidth)
@@ -962,9 +1112,14 @@ function App() {
               autosaveInterval={autosaveInterval}
               databaseLocation={databaseLocation}
               masterPasswordConfigured={encryptionStatus.masterPasswordConfigured}
+              cloudBackup={cloudBackup}
+              readOnly={mutationDisabled}
               onAutosaveIntervalChange={(value) => void updateAutosaveInterval(value)}
               onRevealDatabase={() => void api.RevealJournalDatabaseFile().catch((error) => setLastError(messageFromError(error)))}
               onSetMasterPassword={() => setEncryptionDialog(encryptionStatus.masterPasswordConfigured ? {mode: 'change'} : {mode: 'setup'})}
+              onConfigureCloudBackup={openCloudConfiguration}
+              onSyncCloudBackup={requestCloudSync}
+              onRestoreCloudBackup={requestCloudRestore}
               onDone={() => setSettingsOpen(false)}
             />
           ) : journalDetails ? (
@@ -976,6 +1131,7 @@ function App() {
               focusTitle={titleFocusDocumentId === activeDoc.id}
               saveState={saveState}
               status={status}
+              readOnly={mutationDisabled}
               onDraft={updateActiveDraft}
               onSpacingPresetChange={(spacingPreset) => void updateActiveSpacing(spacingPreset)}
               onFlush={flushActive}
@@ -986,7 +1142,7 @@ function App() {
                 ;(window as unknown as {journalEditor?: Editor}).journalEditor = editor
               }}
               closeRequest={closeRequest}
-              onCloseFlushed={() => void api.CompleteCloseAfterFlush()}
+              onCloseFlushed={() => void completeCloseAfterFlush()}
               onCloseFlushFailed={() => void api.CancelCloseAfterFlushFailure()}
             />
           ) : (
@@ -1006,6 +1162,8 @@ function App() {
               <button type="button" onClick={() => setLastError('')} title="Dismiss"><X size={14}/></button>
             </div>
           )}
+
+          {cloudBackup.busy && (settingsOpen || journalDetails || !activeDoc) && <div className="cloud-sync-status-floating"><CloudSyncStatus/></div>}
 
           {deleteTarget && (
             <DeleteDialog
@@ -1053,6 +1211,18 @@ function App() {
             />
           )}
 
+          {cloudConfigOpen && <CloudBackupDialog cloudBackup={cloudBackup} onCancel={() => setCloudConfigOpen(false)} onSubmit={(command) => void configureCloudBackup(command)}/>}
+
+          {cloudPasswordAction && <CloudBackupPasswordDialog action={cloudPasswordAction} onCancel={() => { const cancelClose = cloudPasswordAction === 'sync-and-quit'; setCloudPasswordAction(null); if (cancelClose) void api.CancelCloseAfterFlushFailure() }} onSubmit={(password) => void runCloudPasswordAction(password)}/>}
+
+          {cloudRestoreConfirm && (
+            <CloudRestoreDialog onCancel={() => setCloudRestoreConfirm(false)} onConfirm={() => { setCloudRestoreConfirm(false); setCloudPasswordAction('restore') }}/>
+          )}
+
+          {closeSyncPrompt && (
+            <CloudCloseDialog onCancel={() => { setCloseSyncPrompt(false); void api.CancelCloseAfterFlushFailure() }} onQuitWithoutSync={() => void api.CompleteCloseAfterFlush()} onSyncAndQuit={() => { setCloseSyncPrompt(false); if (cloudBackup.credentialsReady) void runCloudSync(true); else setCloudPasswordAction('sync-and-quit') }}/>
+          )}
+
           {aboutOpen && <AboutDialog appInfo={appInfo} onClose={() => setAboutOpen(false)}/>}
         </section>
       </section>
@@ -1063,6 +1233,7 @@ function App() {
 type EditorPaneProps = {
   document: DocumentResponse
   focusTitle?: boolean
+  readOnly?: boolean
   saveState: SaveState
   status: string
   onDraft: (content: ProseMirrorDoc) => Promise<void>
@@ -1102,13 +1273,18 @@ function JournalDetailsPane({details, onDone}: {details: JournalDetailsResponse,
   )
 }
 
-function SettingsPane({autosaveInterval, databaseLocation, masterPasswordConfigured, onAutosaveIntervalChange, onRevealDatabase, onSetMasterPassword, onDone}: {
+function SettingsPane({autosaveInterval, databaseLocation, masterPasswordConfigured, cloudBackup, readOnly, onAutosaveIntervalChange, onRevealDatabase, onSetMasterPassword, onConfigureCloudBackup, onSyncCloudBackup, onRestoreCloudBackup, onDone}: {
   autosaveInterval: number
   databaseLocation: JournalDatabaseLocationResponse
   masterPasswordConfigured: boolean
+  cloudBackup: CloudBackupStatusResponse
+  readOnly: boolean
   onAutosaveIntervalChange: (value: number) => void
   onRevealDatabase: () => void
   onSetMasterPassword: () => void
+  onConfigureCloudBackup: () => void
+  onSyncCloudBackup: () => void
+  onRestoreCloudBackup: () => void
   onDone: () => void
 }) {
   return (
@@ -1121,7 +1297,7 @@ function SettingsPane({autosaveInterval, databaseLocation, masterPasswordConfigu
         <h2>Editing</h2>
         <div className="settings-row">
           <div><h3>Autosave interval</h3><p>How often edits are saved while you work.</p></div>
-          <label><input type="number" min={0.5} step={0.25} value={autosaveInterval / 1000} onChange={(event) => onAutosaveIntervalChange(Math.round(Number(event.target.value) * 1000))}/><span>seconds</span></label>
+          <label><input type="number" min={0.5} step={0.25} value={autosaveInterval / 1000} disabled={readOnly} onChange={(event) => onAutosaveIntervalChange(Math.round(Number(event.target.value) * 1000))}/><span>seconds</span></label>
         </div>
         <div className="settings-row">
           <div><h3>Journal database</h3><p className="database-path">{databaseLocation.path}</p></div>
@@ -1132,14 +1308,38 @@ function SettingsPane({autosaveInterval, databaseLocation, masterPasswordConfigu
         <h2>Security</h2>
         <div className="settings-row">
           <div><h3>Master password</h3><p>{masterPasswordConfigured ? 'Change the password that unlocks encrypted Journals.' : 'Set a password before encrypting a Journal.'}</p></div>
-          <button type="button" onClick={onSetMasterPassword}>{masterPasswordConfigured ? 'Change master password' : 'Set master password'}</button>
+          <button type="button" onClick={onSetMasterPassword} disabled={readOnly}>{masterPasswordConfigured ? 'Change master password' : 'Set master password'}</button>
         </div>
+      </section>
+      <section>
+        <h2>Cloud Backup</h2>
+        <div className="settings-row cloud-backup-summary">
+          <div>
+            <h3>{cloudBackup.configured ? (cloudBackup.displayName || cloudBackup.bucket) : 'No endpoint configured'}</h3>
+            <p>{cloudBackup.configured ? `${cloudBackup.endpointUrl} · ${cloudBackup.bucket}${cloudBackup.prefix ? `/${cloudBackup.prefix}` : ''}` : 'Save a complete, verified journal.db snapshot to an S3-compatible endpoint.'}</p>
+            {cloudBackup.lastBackupAt && <p className="cloud-backup-meta">Last backup {formatTimestamp(cloudBackup.lastBackupAt)}</p>}
+            {cloudBackup.lastRemoteAt && <p className="cloud-backup-meta">Remote snapshot observed {formatTimestamp(cloudBackup.lastRemoteAt)}</p>}
+            {cloudBackup.configured && <p className={cloudBackup.unsynced ? 'cloud-backup-error' : 'cloud-backup-meta'}>{cloudBackup.unsynced ? 'Local changes have not been backed up.' : 'Local database is backed up.'}</p>}
+            {cloudBackup.configured && !cloudBackup.credentialsReady && <p className="cloud-backup-meta">Sync asks for the master password once after Journal opens.</p>}
+            {cloudBackup.lastError && <p className="cloud-backup-error">{cloudBackup.lastError}</p>}
+          </div>
+          <div className="settings-actions">
+            <button type="button" onClick={onConfigureCloudBackup} disabled={readOnly}>{cloudBackup.configured ? 'Edit endpoint' : 'Configure endpoint'}</button>
+            {cloudBackup.configured && <button type="button" onClick={onSyncCloudBackup} disabled={readOnly || !cloudBackup.unsynced} title={cloudBackup.unsynced ? undefined : 'No local changes to back up'}>Sync Now</button>}
+          </div>
+        </div>
+        {cloudBackup.configured && <div className="settings-row cloud-backup-controls">
+          <div><h3>Restore from Cloud Backup</h3><p>Replace this device’s database with the current remote snapshot. A local recovery copy is retained first.</p></div>
+          <div className="settings-actions">
+            <button type="button" onClick={onRestoreCloudBackup} disabled={readOnly}>Restore</button>
+          </div>
+        </div>}
       </section>
     </div>
   )
 }
 
-function EditorPane({document, focusTitle = false, saveState, status, onDraft, onSpacingPresetChange, onFlush, onError, onRename, onTitleFocused, onEditorReady, closeRequest, onCloseFlushed, onCloseFlushFailed}: EditorPaneProps) {
+function EditorPane({document, focusTitle = false, readOnly = false, saveState, status, onDraft, onSpacingPresetChange, onFlush, onError, onRename, onTitleFocused, onEditorReady, closeRequest, onCloseFlushed, onCloseFlushFailed}: EditorPaneProps) {
   const [title, setTitle] = useState(document.title)
   const [linkPopover, setLinkPopover] = useState<LinkPopoverState | null>(null)
   const [canCreateLink, setCanCreateLink] = useState(false)
@@ -1201,6 +1401,7 @@ function EditorPane({document, focusTitle = false, saveState, status, onDraft, o
       },
       handleDOMEvents: {
         paste: (view, event) => {
+          if (!view.editable) return true
           const files = imageFilesFromClipboard(event.clipboardData)
           if (files.length === 0) return false
 
@@ -1210,6 +1411,7 @@ function EditorPane({document, focusTitle = false, saveState, status, onDraft, o
           return true
         },
         drop: (view, event) => {
+          if (!view.editable) return true
           const droppedFiles = Array.from(event.dataTransfer?.files ?? [])
           if (droppedFiles.length === 0) return false
           event.preventDefault()
@@ -1223,6 +1425,7 @@ function EditorPane({document, focusTitle = false, saveState, status, onDraft, o
           return true
         },
         contextmenu: (view, event) => {
+          if (!view.editable) return false
           const {from, to} = view.state.selection
           if (from === to) return false
           const position = view.posAtCoords({left: event.clientX, top: event.clientY})
@@ -1270,6 +1473,14 @@ function EditorPane({document, focusTitle = false, saveState, status, onDraft, o
   }, [document.spacingPreset, editor])
 
   useEffect(() => {
+    // Tiptap emits an update event for setEditable by default even though the
+    // document has not changed. Suppress that synthetic event so opening a
+    // document never becomes an autosave.
+    editor?.setEditable(!readOnly, false)
+    if (readOnly) setLinkPopover(null)
+  }, [editor, readOnly])
+
+  useEffect(() => {
     if (!focusTitle) return
     const titleInput = titleInputRef.current
     if (!titleInput) return
@@ -1292,12 +1503,17 @@ function EditorPane({document, focusTitle = false, saveState, status, onDraft, o
   }, [closeRequest, onCloseFlushed, onCloseFlushFailed])
 
   async function flushEditor() {
+    let hasPendingChange = false
     if (title.trim() !== document.title) {
       const renamed = await commitTitle()
       if (!renamed) return false
+      hasPendingChange = true
     }
-    if (pendingDraft.current) await submitDraft()
-    return onFlushRef.current()
+    if (pendingDraft.current) {
+      await submitDraft()
+      hasPendingChange = true
+    }
+    return hasPendingChange ? onFlushRef.current() : true
   }
 
   function commitTitle(focusEditor = false) {
@@ -1330,7 +1546,7 @@ function EditorPane({document, focusTitle = false, saveState, status, onDraft, o
   }
 
   function submitLink(url: string) {
-    if (!editor || !linkPopover) return
+    if (!editor || !editor.isEditable || !linkPopover) return
     const href = normalizeLinkURL(url)
     if (!href) return
 
@@ -1348,7 +1564,7 @@ function EditorPane({document, focusTitle = false, saveState, status, onDraft, o
   }
 
   async function insertImageFiles(files: File[], position?: number) {
-    if (!editor) return
+    if (!editor || !editor.isEditable) return
     let insertPosition = position
     for (const file of files) {
       try {
@@ -1388,6 +1604,7 @@ function EditorPane({document, focusTitle = false, saveState, status, onDraft, o
           ref={titleInputRef}
           className="title-input"
           value={title}
+          disabled={readOnly}
           onChange={(event) => setTitle(event.target.value)}
           onBlur={() => {
             if (skipTitleBlurCommit.current) {
@@ -1415,6 +1632,7 @@ function EditorPane({document, focusTitle = false, saveState, status, onDraft, o
           className="hidden-file-input"
           type="file"
           accept="image/png,image/jpeg,image/gif,image/webp"
+          disabled={readOnly}
           onChange={(event) => {
             const files = Array.from(event.currentTarget.files ?? [])
             event.currentTarget.value = ''
@@ -1429,6 +1647,7 @@ function EditorPane({document, focusTitle = false, saveState, status, onDraft, o
             isTableActive={isTableActive}
             paragraphStyle={paragraphStyle}
             horizontalAlignment={horizontalAlignment}
+            disabled={readOnly}
             spacingPreset={document.spacingPreset ?? 'compact'}
             onCreateLink={openCreateLinkPopover}
             onInsertImage={openImageFilePicker}
@@ -1448,12 +1667,15 @@ function EditorPane({document, focusTitle = false, saveState, status, onDraft, o
         />
       ) : null}
       <footer className="editor-status">
-        <SaveIndicator state={saveState} label={status}/>
+        <div className="editor-status-leading"><SaveIndicator state={saveState} label={status}/></div>
         <span className="document-dates">
           <span>Created {formatTimestamp(document.createdAt)}</span>
           <span>Updated {formatTimestamp(document.updatedAt)}</span>
         </span>
-        <span className="word-count">{editor?.storage.characterCount.words() ?? 0} words</span>
+        <div className="editor-status-trailing">
+          {readOnly && <CloudSyncStatus/>}
+          <span className="word-count">{editor?.storage.characterCount.words() ?? 0} words</span>
+        </div>
       </footer>
     </>
   )
@@ -1782,6 +2004,7 @@ type TreeNodeProps = {
   draggedId: string
   draggedItem?: TreeItem
   creationDisabled: boolean
+  mutationDisabled: boolean
   onToggle: (id: string) => void
   onSelect: (id: string) => void
   onOpen: (id: string) => void
@@ -1830,7 +2053,7 @@ function TreeNode(props: TreeNodeProps) {
         style={{paddingLeft: 10 + level * 16}}
         role="treeitem"
         tabIndex={0}
-        draggable={!isTrash}
+        draggable={!isTrash && !props.mutationDisabled}
         onClick={() => props.onSelect(item.id)}
         onDragStart={() => props.onDragStart(item.id)}
         onDragOver={(event) => {
@@ -1838,7 +2061,7 @@ function TreeNode(props: TreeNodeProps) {
         }}
         onDrop={(event) => {
           event.stopPropagation()
-          if (!draggedId || invalidDrop || !isContainer) return
+          if (props.mutationDisabled || !draggedId || invalidDrop || !isContainer) return
           if (draggedItem?.kind === 'journal') props.onDrop(draggedId, '', item.sortOrder)
           else props.onDrop(draggedId, item.id, -1)
         }}
@@ -1846,12 +2069,12 @@ function TreeNode(props: TreeNodeProps) {
           props.onSelect(item.id)
           if (event.key === 'Enter' && isLockedJournal) props.onOpenEncryptedJournal(item.id)
           else if (event.key === 'Enter' && item.kind === 'document') props.onOpen(item.id)
-          if (event.key === 'F2' && !isTrash) props.onRenameStart(item.id)
-          if (event.key === 'Delete' && !isTrash && !deleteDisabled) props.onDelete(item.id)
+          if (event.key === 'F2' && !isTrash && !props.mutationDisabled) props.onRenameStart(item.id)
+          if (event.key === 'Delete' && !isTrash && !deleteDisabled && !props.mutationDisabled) props.onDelete(item.id)
           if (event.key === 'ArrowRight' && isContainer) props.onToggle(item.id)
           if (event.key === 'ArrowLeft' && isContainer) props.onToggle(item.id)
         }}
-        onDoubleClick={() => !isTrash && props.onRenameStart(item.id)}
+        onDoubleClick={() => !isTrash && !props.mutationDisabled && props.onRenameStart(item.id)}
       >
         <button type="button" className="tree-chevron" onClick={(event) => {
           event.stopPropagation()
@@ -1862,7 +2085,7 @@ function TreeNode(props: TreeNodeProps) {
         </button>
         {isTrash ? <Trash2 size={16}/> : isLockedJournal ? <Shield size={16}/> : isJournal ? isExpanded ? <BookOpenText size={16}/> : <BookMarked size={16}/> : isFolder ? <Folder size={16}/> : <FileText size={16}/>}
 
-        {renamingId === item.id ? (
+        {renamingId === item.id && !props.mutationDisabled ? (
           <input
             className="rename-input"
             value={draftTitle}
@@ -1895,7 +2118,7 @@ function TreeNode(props: TreeNodeProps) {
           {item.kind === 'document' && !isTrash && <button type="button" onClick={(event) => {
             event.stopPropagation()
             props.onDuplicateDocument(item.id)
-          }} title="Duplicate document"><Files size={13}/></button>}
+          }} disabled={props.mutationDisabled} title="Duplicate document"><Files size={13}/></button>}
           {item.kind === 'document' && !isTrash && <button type="button" onClick={(event) => {
             event.stopPropagation()
             props.onExportDocument(item.id)
@@ -1907,12 +2130,96 @@ function TreeNode(props: TreeNodeProps) {
           {!isTrash && !isJournal && <button type="button" onClick={(event) => {
             event.stopPropagation()
             props.onDelete(item.id)
-          }} disabled={deleteDisabled} title={deleteDisabled ? 'At least one journal is required' : 'Delete'}><Trash2 size={13}/></button>}
+          }} disabled={deleteDisabled || props.mutationDisabled} title={deleteDisabled ? 'At least one journal is required' : 'Delete'}><Trash2 size={13}/></button>}
         </div>
       </div>
       {isContainer && isExpanded && item.children.map((child) => (
         <TreeNode key={child.id} {...props} item={child} level={level + 1}/>
       ))}
+    </div>
+  )
+}
+
+function CloudBackupDialog({cloudBackup, onCancel, onSubmit}: {cloudBackup: CloudBackupStatusResponse, onCancel: () => void, onSubmit: (command: CloudBackupEndpointCommand) => void}) {
+  const [endpointUrl, setEndpointUrl] = useState(cloudBackup.endpointUrl)
+  const [bucket, setBucket] = useState(cloudBackup.bucket)
+  const [region, setRegion] = useState(cloudBackup.region)
+  const [prefix, setPrefix] = useState(cloudBackup.prefix)
+  const [displayName, setDisplayName] = useState(cloudBackup.displayName)
+  const [forcePathStyle, setForcePathStyle] = useState(cloudBackup.forcePathStyle)
+  const [accessKeyId, setAccessKeyId] = useState('')
+  const [secretAccessKey, setSecretAccessKey] = useState('')
+  const [sessionToken, setSessionToken] = useState('')
+  const [masterPassword, setMasterPassword] = useState('')
+
+  function submit() {
+    if (!endpointUrl.trim() || !bucket.trim() || !region.trim() || !accessKeyId.trim() || !secretAccessKey.trim() || !masterPassword.trim()) return
+    onSubmit({endpointUrl, bucket, region, prefix, forcePathStyle, displayName, accessKeyId, secretAccessKey, sessionToken, masterPassword})
+  }
+
+  return (
+    <div className="dialog-backdrop" role="presentation" onMouseDown={onCancel}>
+      <section className="confirm-dialog cloud-config-dialog" role="dialog" aria-modal="true" aria-labelledby="cloud-config-title" onMouseDown={(event) => event.stopPropagation()}>
+        <h2 id="cloud-config-title">Configure Cloud Backup</h2>
+        <p>Journal uses the standard S3 API. Backblaze B2 and other S3-compatible services are supported.</p>
+        <div className="cloud-config-fields">
+          <label>Endpoint URL<input value={endpointUrl} autoFocus placeholder="https://s3.example.com" onChange={(event) => setEndpointUrl(event.target.value)}/></label>
+          <label>Bucket<input value={bucket} placeholder="journal-backups" onChange={(event) => setBucket(event.target.value)}/></label>
+          <label>Signing region<input value={region} placeholder="us-west-000" onChange={(event) => setRegion(event.target.value)}/></label>
+          <label>Prefix <span>(optional)</span><input value={prefix} placeholder="personal" onChange={(event) => setPrefix(event.target.value)}/></label>
+          <label>Display name <span>(optional)</span><input value={displayName} placeholder="Backblaze B2" onChange={(event) => setDisplayName(event.target.value)}/></label>
+          <label>Access key ID<input value={accessKeyId} autoComplete="off" onChange={(event) => setAccessKeyId(event.target.value)}/></label>
+          <label>Secret access key<input type="password" value={secretAccessKey} autoComplete="new-password" onChange={(event) => setSecretAccessKey(event.target.value)}/></label>
+          <label>Session token <span>(optional)</span><input type="password" value={sessionToken} autoComplete="new-password" onChange={(event) => setSessionToken(event.target.value)}/></label>
+          <label>Master password<input type="password" value={masterPassword} autoComplete="current-password" onChange={(event) => setMasterPassword(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') submit() }}/></label>
+          <label className="cloud-path-style"><input type="checkbox" checked={forcePathStyle} onChange={(event) => setForcePathStyle(event.target.checked)}/> Use path-style S3 addressing</label>
+        </div>
+        <p className="cloud-config-note">Credentials are encrypted in journal.db with your master password. Use an endpoint key limited to this backup bucket and prefix.</p>
+        <div className="dialog-actions"><button type="button" onClick={onCancel}>Cancel</button><button type="button" onClick={submit}>Save endpoint</button></div>
+      </section>
+    </div>
+  )
+}
+
+function CloudBackupPasswordDialog({action, onCancel, onSubmit}: {action: Exclude<CloudPasswordAction, null>, onCancel: () => void, onSubmit: (password: string) => void}) {
+  const [password, setPassword] = useState('')
+  const restoring = action === 'restore'
+  return (
+    <div className="dialog-backdrop" role="presentation" onMouseDown={onCancel}>
+      <section className="confirm-dialog encryption-dialog" role="dialog" aria-modal="true" aria-labelledby="cloud-password-title" onMouseDown={(event) => event.stopPropagation()}>
+        <h2 id="cloud-password-title">{restoring ? 'Restore Cloud Backup' : 'Sync Cloud Backup'}</h2>
+        <p>Enter the master password to decrypt the Cloud Backup credential. This does not unlock encrypted Journals.</p>
+        <div className="password-fields"><input type="password" autoFocus placeholder="Master password" value={password} onChange={(event) => setPassword(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && password.trim()) onSubmit(password) }}/></div>
+        <div className="dialog-actions"><button type="button" onClick={onCancel}>Cancel</button><button type="button" onClick={() => onSubmit(password)} disabled={!password.trim()}>{restoring ? 'Restore' : 'Sync Now'}</button></div>
+      </section>
+    </div>
+  )
+}
+
+function CloudRestoreDialog({onCancel, onConfirm}: {onCancel: () => void, onConfirm: () => void}) {
+  return (
+    <div className="dialog-backdrop" role="presentation" onMouseDown={onCancel}>
+      <section className="confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="cloud-restore-title" onMouseDown={(event) => event.stopPropagation()}>
+        <h2 id="cloud-restore-title">Restore Cloud Backup?</h2>
+        <p>This replaces the complete local Journal database with the remote snapshot, including settings and Cloud Backup configuration. Journal saves a local recovery copy first, then closes so you can reopen the restored database.</p>
+        <div className="dialog-actions"><button type="button" onClick={onCancel}>Cancel</button><button type="button" className="danger-action" onClick={onConfirm}>Continue</button></div>
+      </section>
+    </div>
+  )
+}
+
+function CloudSyncStatus() {
+  return <span className="cloud-sync-status" role="status"><span/>Syncing cloud backup</span>
+}
+
+function CloudCloseDialog({onCancel, onQuitWithoutSync, onSyncAndQuit}: {onCancel: () => void, onQuitWithoutSync: () => void, onSyncAndQuit: () => void}) {
+  return (
+    <div className="dialog-backdrop" role="presentation" onMouseDown={onCancel}>
+      <section className="confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="cloud-close-title" onMouseDown={(event) => event.stopPropagation()}>
+        <h2 id="cloud-close-title">Cloud Backup is out of date</h2>
+        <p>Local changes have not been copied to Cloud Backup. Sync before quitting, or explicitly quit without a new backup.</p>
+        <div className="dialog-actions"><button type="button" onClick={onCancel}>Cancel</button><button type="button" className="quiet-action" onClick={onQuitWithoutSync}>Quit Without Sync</button><button type="button" onClick={onSyncAndQuit}>Sync and Quit</button></div>
+      </section>
     </div>
   )
 }
