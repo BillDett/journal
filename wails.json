@@ -8,7 +8,7 @@
   "frontend:dev:serverUrl": "auto",
   "info": {
     "productName": "Journal",
-    "productVersion": "1.4.0",
+    "productVersion": "1.5.0",
     "companyName": "Bill Dettelback",
     "comments": "Journal is free and open source software."
   },
