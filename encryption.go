@@ -151,6 +151,9 @@ func (s *JournalService) UnlockEncryption(password string) error {
 }
 
 func (s *JournalService) LockEncryption() error {
+	if err := s.invalidateEncryptedCRDTSessions(); err != nil {
+		return err
+	}
 	s.cryptoMu.Lock()
 	for i := range s.masterKey {
 		s.masterKey[i] = 0
@@ -210,11 +213,6 @@ func (s *JournalService) ChangeMasterPassword(currentPassword string, newPasswor
 	if err != nil {
 		return err
 	}
-	cloudNonce, cloudCiphertext, hasCloudCredentials, err := s.rewrapCloudBackupCredentials(oldKey, newKey)
-	if err != nil {
-		return err
-	}
-
 	tx, err := s.db.Begin()
 	if err != nil {
 		return err
@@ -242,11 +240,6 @@ func (s *JournalService) ChangeMasterPassword(currentPassword string, newPasswor
 			 WHERE key_id = ?`,
 			nonce, ciphertext, now, row.KeyID,
 		); err != nil {
-			return err
-		}
-	}
-	if hasCloudCredentials {
-		if _, err := tx.Exec(`UPDATE cloud_backup_config SET credential_nonce = ?, credential_ciphertext = ?, updated_at = ? WHERE id = 1`, cloudNonce, cloudCiphertext, now); err != nil {
 			return err
 		}
 	}
@@ -340,6 +333,9 @@ func (s *JournalService) EncryptJournal(journalID string) (TreeResponse, error) 
 			return TreeResponse{}, err
 		}
 		if item.Kind == KindDocument {
+			if err := s.encryptCRDTDocumentTx(tx, item.ID, dataKey, keyID); err != nil {
+				return TreeResponse{}, err
+			}
 			var encoded string
 			if err := tx.QueryRow(`SELECT content_json FROM documents WHERE item_id = ?`, item.ID).Scan(&encoded); err != nil {
 				return TreeResponse{}, err
@@ -549,22 +545,11 @@ func (s *JournalService) copyEncryptedChildrenToPlaintextTx(tx *sql.Tx, sourcePa
 			); err != nil {
 				return err
 			}
-			attachmentIDMap, err := s.copyDocumentAttachmentsTx(tx, source.ID, newID, key, keyID)
-			if err != nil {
+			if err := s.copyCRDTDocumentToPlaintextTx(tx, source.ID, newID, key, keyID); err != nil {
 				return err
 			}
-			if len(attachmentIDMap) > 0 {
-				var content map[string]any
-				if err := json.Unmarshal(encoded, &content); err != nil {
-					return err
-				}
-				encodedContent, err := json.Marshal(remapAttachmentIDsInContent(content, attachmentIDMap))
-				if err != nil {
-					return err
-				}
-				if _, err := tx.Exec(`UPDATE documents SET content_json = ? WHERE item_id = ?`, string(encodedContent), newID); err != nil {
-					return err
-				}
+			if err := s.decryptDocumentAttachmentsTx(tx, source.ID, newID, key, keyID); err != nil {
+				return err
 			}
 			if err := s.syncFTSTx(tx, newID); err != nil {
 				return err
@@ -745,7 +730,9 @@ func (s *JournalService) encryptedJournalIDs() ([]string, error) {
 		return nil, err
 	}
 	defer rows.Close()
-	var ids []string
+	// Wails serializes a nil slice as JSON null. The frontend contract is an
+	// array, including when this database has no encrypted journals.
+	ids := make([]string, 0)
 	for rows.Next() {
 		var id string
 		if err := rows.Scan(&id); err != nil {

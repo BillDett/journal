@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -9,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -150,108 +150,22 @@ func TestBootstrapCreatesTrashAndSettings(t *testing.T) {
 	}
 }
 
-func TestCloudCredentialsUseMasterPasswordWithoutUnlockingJournals(t *testing.T) {
+func TestEncryptionStatusSerializesEmptyJournalIDsAsArray(t *testing.T) {
 	service := newTestService(t)
-	if err := service.CreateMasterPassword("cloud password"); err != nil {
-		t.Fatalf("create master password: %v", err)
-	}
-	key, err := service.verifyMasterPassword("cloud password")
-	if err != nil {
-		t.Fatalf("verify master password: %v", err)
-	}
-	payload, err := json.Marshal(cloudCredentials{AccessKeyID: "key", SecretAccessKey: "secret"})
-	if err != nil {
-		t.Fatalf("encode credentials: %v", err)
-	}
-	nonce, ciphertext, err := sealDetached(key, payload, []byte(cloudCredentialAD))
-	if err != nil {
-		t.Fatalf("seal credentials: %v", err)
-	}
-	zeroBytes(key)
-	now := nowString()
-	if _, err := service.db.Exec(`INSERT INTO cloud_backup_config (id, endpoint_url, bucket, region, prefix, force_path_style, display_name, credential_nonce, credential_ciphertext, validated_at, created_at, updated_at) VALUES (1, ?, ?, ?, '', 0, '', ?, ?, ?, ?, ?)`, "https://s3.example.test", "bucket", "test-region", nonce, ciphertext, now, now, now); err != nil {
-		t.Fatalf("insert cloud configuration: %v", err)
-	}
-	if err := service.LockEncryption(); err != nil {
-		t.Fatalf("lock journals: %v", err)
-	}
-	_, credentialsValue, err := service.cloudConfigAndCredentials("cloud password")
-	if err != nil {
-		t.Fatalf("cloud credentials should not depend on Journal unlock state: %v", err)
-	}
-	if credentialsValue.SecretAccessKey != "secret" {
-		t.Fatalf("unexpected credential after cloud decrypt: %#v", credentialsValue)
-	}
-	status, err := service.UnlockCloudBackupCredentials("cloud password")
-	if err != nil || !status.CredentialsReady {
-		t.Fatalf("unlock cloud credentials: %#v / %v", status, err)
-	}
-	if err := service.LockEncryption(); err != nil {
-		t.Fatalf("lock journals after cloud credential unlock: %v", err)
-	}
-	_, credentialsValue, err = service.cloudConfigAndSession()
-	if err != nil || credentialsValue.AccessKeyID != "key" {
-		t.Fatalf("cloud session should survive Journal lock, got %#v / %v", credentialsValue, err)
-	}
-	if err := service.ChangeMasterPassword("cloud password", "new cloud password"); err != nil {
-		t.Fatalf("change master password: %v", err)
-	}
-	if _, _, err := service.cloudConfigAndCredentials("cloud password"); !errors.Is(err, ErrInvalidMasterPassword) {
-		t.Fatalf("expected old cloud password to fail, got %v", err)
-	}
-	_, credentialsValue, err = service.cloudConfigAndCredentials("new cloud password")
-	if err != nil || credentialsValue.AccessKeyID != "key" {
-		t.Fatalf("expected rewrapped cloud credentials, got %#v / %v", credentialsValue, err)
-	}
-}
 
-func TestCloudBackupDirtyStateTracksPermanentDeletion(t *testing.T) {
-	service := newTestService(t)
-	document, err := service.CreateDocument("")
+	status, err := service.GetEncryptionStatus()
 	if err != nil {
-		t.Fatalf("create document: %v", err)
+		t.Fatalf("get encryption status: %v", err)
 	}
-	if _, err := service.TrashItem(TrashItemCommand{ID: document.ID}); err != nil {
-		t.Fatalf("move document to trash: %v", err)
+	if status.EncryptedJournalIDs == nil {
+		t.Fatal("empty encrypted journal IDs must be a non-nil slice")
 	}
-	now := nowString()
-	if _, err := service.db.Exec(`INSERT INTO cloud_backup_config
-		(id, endpoint_url, bucket, region, prefix, force_path_style, display_name, credential_nonce, credential_ciphertext, validated_at, last_backup_at, created_at, updated_at)
-		VALUES (1, 'https://s3.example.test', 'bucket', 'region', '', 0, '', X'00', X'00', ?, ?, ?, ?)`, now, now, now, now); err != nil {
-		t.Fatalf("insert cloud configuration: %v", err)
-	}
-	if _, err := service.db.Exec(`UPDATE cloud_backup_state SET last_backup_generation = change_generation WHERE id = 1`); err != nil {
-		t.Fatalf("mark initial backup generation: %v", err)
-	}
-	config, err := service.loadCloudBackupConfig()
+	encoded, err := json.Marshal(status)
 	if err != nil {
-		t.Fatalf("load cloud configuration: %v", err)
+		t.Fatalf("marshal encryption status: %v", err)
 	}
-	if service.cloudBackupUnsynced(config) {
-		t.Fatal("expected cloud backup to start clean")
-	}
-	if _, err := service.TrashItem(TrashItemCommand{ID: document.ID, ExpectedInTrash: true}); err != nil {
-		t.Fatalf("permanently delete document: %v", err)
-	}
-	if !service.cloudBackupUnsynced(config) {
-		t.Fatal("permanent deletion must mark the cloud backup dirty")
-	}
-}
-
-func TestCloudSyncRejectsCleanLocalDatabase(t *testing.T) {
-	service := newTestService(t)
-	now := nowString()
-	if _, err := service.db.Exec(`INSERT INTO cloud_backup_config
-		(id, endpoint_url, bucket, region, prefix, force_path_style, display_name, credential_nonce, credential_ciphertext, validated_at, last_manifest_token, last_backup_at, created_at, updated_at)
-		VALUES (1, 'https://s3.example.test', 'bucket', 'region', '', 0, '', X'00', X'00', ?, 'etag', ?, ?, ?)`, now, now, now, now); err != nil {
-		t.Fatalf("insert cloud configuration: %v", err)
-	}
-	if _, err := service.db.Exec(`UPDATE cloud_backup_state SET last_backup_generation = change_generation WHERE id = 1`); err != nil {
-		t.Fatalf("mark initial backup generation: %v", err)
-	}
-	service.setCloudCredentials(cloudCredentials{AccessKeyID: "key", SecretAccessKey: "secret"})
-	if _, err := service.SyncCloudBackup(context.Background()); !errors.Is(err, ErrCloudBackupNothingToSync) {
-		t.Fatalf("expected clean database sync to be rejected, got %v", err)
+	if !strings.Contains(string(encoded), `"encryptedJournalIds":[]`) {
+		t.Fatalf("empty encrypted journal IDs must marshal as an array: %s", encoded)
 	}
 }
 
@@ -349,6 +263,380 @@ func TestDocumentLifecycleSearchAndTrash(t *testing.T) {
 	}
 	if _, err := service.OpenDocument(doc.ID); err == nil {
 		t.Fatal("expected permanent delete to remove document")
+	}
+}
+
+func TestCRDTDocumentPersistsUpdatesAndMaterializedProjection(t *testing.T) {
+	service := newTestService(t)
+	document, err := service.CreateDocument("")
+	if err != nil {
+		t.Fatalf("create document: %v", err)
+	}
+
+	session, err := service.OpenCRDTSession(document.ID)
+	if err != nil {
+		t.Fatalf("open initial CRDT session: %v", err)
+	}
+	if !session.Bootstrap {
+		t.Fatal("new document should bootstrap a CRDT snapshot")
+	}
+	if _, err := service.BootstrapCRDTDocument(CRDTBootstrapCommand{SessionID: session.SessionID, Snapshot: "AQID"}); err != nil {
+		t.Fatalf("bootstrap CRDT document: %v", err)
+	}
+	ack, err := service.SubmitCRDTUpdates(CRDTUpdateCommand{SessionID: session.SessionID, Updates: []CRDTWireUpdate{{ID: "test-update", Data: "BAUG"}}})
+	if err != nil {
+		t.Fatalf("persist CRDT update: %v", err)
+	}
+	if ack.ThroughSeq == 0 {
+		t.Fatal("CRDT update did not receive a durable sequence")
+	}
+	if _, err := service.SubmitCRDTUpdates(CRDTUpdateCommand{SessionID: session.SessionID, Updates: []CRDTWireUpdate{{ID: "test-update", Data: "BAUG"}}}); err != nil {
+		t.Fatalf("retry CRDT update: %v", err)
+	}
+	var updateCount int
+	if err := service.db.QueryRow(`SELECT COUNT(*) FROM document_crdt_updates WHERE document_id = ?`, document.ID).Scan(&updateCount); err != nil {
+		t.Fatalf("count CRDT updates: %v", err)
+	}
+	if updateCount != 1 {
+		t.Fatalf("duplicate retry created %d updates, want 1", updateCount)
+	}
+	if err := service.MaterializeCRDTProjection(CRDTProjectionCommand{SessionID: session.SessionID, ThroughSeq: ack.ThroughSeq, StateVector: "Bwg=", Snapshot: "AQIDBAUG", Content: document.Content}); err != nil {
+		t.Fatalf("materialize CRDT projection: %v", err)
+	}
+	service.CloseCRDTSession(session.SessionID)
+
+	reopened, err := service.OpenCRDTSession(document.ID)
+	if err != nil {
+		t.Fatalf("reopen CRDT document: %v", err)
+	}
+	if reopened.Bootstrap || reopened.Snapshot != "AQIDBAUG" || len(reopened.Updates) != 0 {
+		t.Fatalf("unexpected persisted CRDT bootstrap: %#v", reopened)
+	}
+	if reopened.ThroughSeq != ack.ThroughSeq {
+		t.Fatalf("reopened sequence = %d, want %d", reopened.ThroughSeq, ack.ThroughSeq)
+	}
+	encoded, err := json.Marshal(reopened)
+	if err != nil {
+		t.Fatalf("marshal reopened CRDT session: %v", err)
+	}
+	if strings.Contains(string(encoded), `"updates":null`) {
+		t.Fatalf("empty CRDT update log must serialize as an array: %s", encoded)
+	}
+}
+
+type legacyFixtureDocument struct {
+	ID                string
+	ContentJSON       string
+	ContentCiphertext []byte
+}
+
+func copyMigrationFixture(t *testing.T, name string) string {
+	t.Helper()
+	source := filepath.Join("testdata", "fixtures", name)
+	contents, err := os.ReadFile(source)
+	if err != nil {
+		t.Fatalf("read fixture %s: %v", name, err)
+	}
+	path := filepath.Join(t.TempDir(), "journal.db")
+	if err := os.WriteFile(path, contents, 0o600); err != nil {
+		t.Fatalf("copy fixture %s: %v", name, err)
+	}
+	return path
+}
+
+func readLegacyFixtureDocument(t *testing.T, path string, encrypted bool) legacyFixtureDocument {
+	t.Helper()
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("open fixture database: %v", err)
+	}
+	defer db.Close()
+	where := "content_ciphertext IS NULL"
+	if encrypted {
+		where = "content_ciphertext IS NOT NULL"
+	}
+	var document legacyFixtureDocument
+	err = db.QueryRow(`SELECT item_id, content_json, content_ciphertext FROM documents WHERE `+where).Scan(
+		&document.ID, &document.ContentJSON, &document.ContentCiphertext,
+	)
+	if err != nil {
+		t.Fatalf("read legacy fixture document: %v", err)
+	}
+	return document
+}
+
+func sqliteObjectExists(t *testing.T, db *sql.DB, kind, name string) bool {
+	t.Helper()
+	var count int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type = ? AND name = ?`, kind, name).Scan(&count); err != nil {
+		t.Fatalf("inspect SQLite object %s %s: %v", kind, name, err)
+	}
+	return count == 1
+}
+
+func sqliteUserVersion(t *testing.T, path string) int {
+	t.Helper()
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("open fixture version database: %v", err)
+	}
+	defer db.Close()
+	var version int
+	if err := db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil {
+		t.Fatalf("read fixture user_version: %v", err)
+	}
+	return version
+}
+
+func TestJournal140PlaintextFixtureUpgrade(t *testing.T) {
+	path := copyMigrationFixture(t, "journal-1.4.0-plaintext.db")
+	legacy := readLegacyFixtureDocument(t, path, false)
+	if version := sqliteUserVersion(t, path); version != 1 {
+		t.Fatalf("fixture schema version = %d, want 1", version)
+	}
+
+	upgraded, err := OpenJournalService(path)
+	if err != nil {
+		t.Fatalf("upgrade 1.4.0 plaintext fixture: %v", err)
+	}
+	defer upgraded.Close()
+
+	var version int
+	if err := upgraded.db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil {
+		t.Fatalf("read upgraded version: %v", err)
+	}
+	if version != 4 {
+		t.Fatalf("schema version = %d, want 4", version)
+	}
+	backupPath := path + ".pre-1.6.0.db"
+	info, err := os.Stat(backupPath)
+	if err != nil {
+		t.Fatalf("stat pre-upgrade copy: %v", err)
+	}
+	if info.Size() == 0 {
+		t.Fatal("pre-upgrade copy is empty")
+	}
+	backupLegacy := readLegacyFixtureDocument(t, backupPath, false)
+	if backupLegacy.ContentJSON != legacy.ContentJSON {
+		t.Fatal("pre-upgrade backup did not preserve the legacy document JSON")
+	}
+	if version := sqliteUserVersion(t, backupPath); version != 1 {
+		t.Fatalf("pre-upgrade backup schema version = %d, want 1", version)
+	}
+	backupDB, err := sql.Open("sqlite", backupPath)
+	if err != nil {
+		t.Fatalf("open pre-upgrade backup: %v", err)
+	}
+	if !sqliteObjectExists(t, backupDB, "table", "cloud_backup_config") ||
+		!sqliteObjectExists(t, backupDB, "table", "cloud_backup_state") ||
+		!sqliteObjectExists(t, backupDB, "trigger", "cloud_backup_generation_items_insert") {
+		_ = backupDB.Close()
+		t.Fatal("pre-upgrade backup was created after Cloud Backup objects were removed")
+	}
+	if err := backupDB.Close(); err != nil {
+		t.Fatalf("close pre-upgrade backup: %v", err)
+	}
+	if sqliteObjectExists(t, upgraded.db, "table", "cloud_backup_config") ||
+		sqliteObjectExists(t, upgraded.db, "table", "cloud_backup_state") ||
+		sqliteObjectExists(t, upgraded.db, "trigger", "cloud_backup_generation_items_insert") {
+		t.Fatal("migration left stale Cloud Backup SQLite objects behind")
+	}
+	var currentJSON string
+	if err := upgraded.db.QueryRow(`SELECT content_json FROM documents WHERE item_id = ?`, legacy.ID).Scan(&currentJSON); err != nil {
+		t.Fatalf("read upgraded plaintext document: %v", err)
+	}
+	if currentJSON != legacy.ContentJSON {
+		t.Fatal("schema migration changed unconverted plaintext content_json")
+	}
+	var states int
+	if err := upgraded.db.QueryRow(`SELECT COUNT(*) FROM document_crdt_state WHERE document_id = ?`, legacy.ID).Scan(&states); err != nil {
+		t.Fatalf("count CRDT state before open: %v", err)
+	}
+	if states != 0 {
+		t.Fatalf("migration eagerly created %d CRDT states", states)
+	}
+
+	session, err := upgraded.OpenCRDTSession(legacy.ID)
+	if err != nil {
+		t.Fatalf("open legacy document's first CRDT session: %v", err)
+	}
+	if !session.Bootstrap {
+		t.Fatal("first opening a legacy document must request a CRDT bootstrap")
+	}
+	fixture := loadCRDTFixture(t)
+	if _, err := upgraded.BootstrapCRDTDocument(CRDTBootstrapCommand{SessionID: session.SessionID, Snapshot: fixture.Snapshot}); err != nil {
+		t.Fatalf("persist lazy CRDT bootstrap: %v", err)
+	}
+	if err := upgraded.db.QueryRow(`SELECT COUNT(*) FROM document_crdt_state WHERE document_id = ?`, legacy.ID).Scan(&states); err != nil {
+		t.Fatalf("count CRDT state after first open: %v", err)
+	}
+	if states != 1 {
+		t.Fatalf("first opening a legacy document created %d CRDT states, want 1", states)
+	}
+	upgraded.CloseCRDTSession(session.SessionID)
+	reopened, err := upgraded.OpenCRDTSession(legacy.ID)
+	if err != nil {
+		t.Fatalf("reopen lazily converted plaintext document: %v", err)
+	}
+	if reopened.Bootstrap || reopened.Snapshot != fixture.Snapshot {
+		t.Fatalf("reopened lazy CRDT state = %#v", reopened)
+	}
+	if err := upgraded.db.QueryRow(`SELECT content_json FROM documents WHERE item_id = ?`, legacy.ID).Scan(&currentJSON); err != nil {
+		t.Fatalf("read lazily converted plaintext document: %v", err)
+	}
+	if currentJSON != legacy.ContentJSON {
+		t.Fatal("lazy CRDT bootstrap changed the legacy plaintext projection")
+	}
+}
+
+func TestJournal140LockedEncryptedFixtureDefersCRDTConversion(t *testing.T) {
+	path := copyMigrationFixture(t, "journal-1.4.0-locked-encrypted.db")
+	legacy := readLegacyFixtureDocument(t, path, true)
+	if version := sqliteUserVersion(t, path); version != 1 {
+		t.Fatalf("fixture schema version = %d, want 1", version)
+	}
+
+	upgraded, err := OpenJournalService(path)
+	if err != nil {
+		t.Fatalf("upgrade locked 1.4.0 fixture: %v", err)
+	}
+	defer upgraded.Close()
+	if _, err := upgraded.OpenCRDTSession(legacy.ID); !errors.Is(err, ErrEncryptionLocked) {
+		t.Fatalf("locked legacy CRDT open error = %v, want ErrEncryptionLocked", err)
+	}
+	var states int
+	if err := upgraded.db.QueryRow(`SELECT COUNT(*) FROM document_crdt_state WHERE document_id = ?`, legacy.ID).Scan(&states); err != nil {
+		t.Fatalf("count locked CRDT states: %v", err)
+	}
+	if states != 0 {
+		t.Fatalf("locked journal unexpectedly created %d CRDT states", states)
+	}
+	var currentJSON string
+	var currentCiphertext []byte
+	if err := upgraded.db.QueryRow(`SELECT content_json, content_ciphertext FROM documents WHERE item_id = ?`, legacy.ID).Scan(&currentJSON, &currentCiphertext); err != nil {
+		t.Fatalf("read locked legacy document: %v", err)
+	}
+	if currentJSON != legacy.ContentJSON || !reflect.DeepEqual(currentCiphertext, legacy.ContentCiphertext) {
+		t.Fatal("schema migration changed the locked legacy document")
+	}
+
+	if err := upgraded.UnlockEncryption("fixture password"); err != nil {
+		t.Fatalf("unlock legacy fixture: %v", err)
+	}
+	opened, err := upgraded.OpenDocument(legacy.ID)
+	if err != nil {
+		t.Fatalf("open unlocked legacy document: %v", err)
+	}
+	fixture := loadCRDTFixture(t)
+	if !reflect.DeepEqual(opened.Content, fixture.Content) {
+		t.Fatalf("unlocked legacy content = %#v, want %#v", opened.Content, fixture.Content)
+	}
+	session, err := upgraded.OpenCRDTSession(legacy.ID)
+	if err != nil {
+		t.Fatalf("open unlocked legacy CRDT session: %v", err)
+	}
+	if !session.Bootstrap {
+		t.Fatal("unlocked legacy document must bootstrap CRDT state lazily")
+	}
+	if _, err := upgraded.BootstrapCRDTDocument(CRDTBootstrapCommand{SessionID: session.SessionID, Snapshot: fixture.Snapshot}); err != nil {
+		t.Fatalf("persist encrypted lazy CRDT bootstrap: %v", err)
+	}
+	var snapshot []byte
+	var snapshotKeyID sql.NullString
+	if err := upgraded.db.QueryRow(`SELECT snapshot, snapshot_key_id FROM document_crdt_state WHERE document_id = ?`, legacy.ID).Scan(&snapshot, &snapshotKeyID); err != nil {
+		t.Fatalf("read encrypted lazy CRDT state: %v", err)
+	}
+	if len(snapshot) == 0 || !snapshotKeyID.Valid || snapshotKeyID.String == "" {
+		t.Fatal("lazy CRDT state for an encrypted journal was not encrypted")
+	}
+	upgraded.CloseCRDTSession(session.SessionID)
+	reopened, err := upgraded.OpenCRDTSession(legacy.ID)
+	if err != nil {
+		t.Fatalf("reopen lazily converted encrypted document: %v", err)
+	}
+	if reopened.Bootstrap || reopened.Snapshot != fixture.Snapshot {
+		t.Fatalf("reopened encrypted lazy CRDT state = %#v", reopened)
+	}
+}
+
+func TestDatabaseAllowsOnlyOneJournalService(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "journal.db")
+	first, err := OpenJournalService(path)
+	if err != nil {
+		t.Fatalf("open first service: %v", err)
+	}
+	defer first.Close()
+	if _, err := OpenJournalService(path); !errors.Is(err, ErrDatabaseInUse) {
+		t.Fatalf("second service error = %v, want ErrDatabaseInUse", err)
+	}
+}
+
+func TestStartupDatabaseErrorReportsDatabaseInUse(t *testing.T) {
+	message := startupDatabaseErrorMessage("/tmp/journal.db", ErrDatabaseInUse)
+	if !strings.Contains(message, "another application is using it") || !strings.Contains(message, "did not start") {
+		t.Fatalf("unexpected database-in-use startup message: %s", message)
+	}
+}
+
+func TestEncryptJournalEncryptsCRDTState(t *testing.T) {
+	service := newTestService(t)
+	document, err := service.CreateDocument("")
+	if err != nil {
+		t.Fatalf("create document: %v", err)
+	}
+	session, err := service.OpenCRDTSession(document.ID)
+	if err != nil {
+		t.Fatalf("open CRDT session: %v", err)
+	}
+	if _, err := service.BootstrapCRDTDocument(CRDTBootstrapCommand{SessionID: session.SessionID, Snapshot: "AQID"}); err != nil {
+		t.Fatalf("bootstrap CRDT session: %v", err)
+	}
+	if err := service.CreateMasterPassword("test password"); err != nil {
+		t.Fatalf("create master password: %v", err)
+	}
+	journalID, err := service.journalIDForItem(document.ID)
+	if err != nil {
+		t.Fatalf("find document journal: %v", err)
+	}
+	if _, err := service.EncryptJournal(journalID); err != nil {
+		t.Fatalf("encrypt journal: %v", err)
+	}
+	var snapshot []byte
+	var keyID sql.NullString
+	if err := service.db.QueryRow(`SELECT snapshot, snapshot_key_id FROM document_crdt_state WHERE document_id = ?`, document.ID).Scan(&snapshot, &keyID); err != nil {
+		t.Fatalf("read encrypted CRDT snapshot: %v", err)
+	}
+	if !keyID.Valid || string(snapshot) == "\x01\x02\x03" {
+		t.Fatalf("CRDT snapshot was not encrypted: key=%#v snapshot=%x", keyID, snapshot)
+	}
+	if err := service.LockEncryption(); err != nil {
+		t.Fatalf("lock encrypted journal: %v", err)
+	}
+	if _, err := service.OpenCRDTSession(document.ID); !errors.Is(err, ErrEncryptionLocked) {
+		t.Fatalf("locked CRDT session error = %v, want ErrEncryptionLocked", err)
+	}
+	if err := service.UnlockEncryption("test password"); err != nil {
+		t.Fatalf("unlock encrypted journal: %v", err)
+	}
+	reopened, err := service.OpenCRDTSession(document.ID)
+	if err != nil {
+		t.Fatalf("open unlocked CRDT session: %v", err)
+	}
+	if reopened.Snapshot != "AQID" {
+		t.Fatalf("unlocked CRDT snapshot = %q, want AQID", reopened.Snapshot)
+	}
+	ack, err := service.SubmitCRDTUpdates(CRDTUpdateCommand{SessionID: reopened.SessionID, Updates: []CRDTWireUpdate{{ID: "encrypted-update", Data: "BAUG"}}})
+	if err != nil {
+		t.Fatalf("persist encrypted CRDT update: %v", err)
+	}
+	if err := service.MaterializeCRDTProjection(CRDTProjectionCommand{
+		SessionID:   reopened.SessionID,
+		ThroughSeq:  ack.ThroughSeq,
+		StateVector: "Bwg=",
+		Snapshot:    "AQIDBAUG",
+		Content:     document.Content,
+	}); err != nil {
+		t.Fatalf("materialize encrypted CRDT projection: %v", err)
 	}
 }
 

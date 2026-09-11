@@ -1,7 +1,5 @@
 package main
 
-import "context"
-
 // Commands is the application boundary used by the Wails adapter. It keeps
 // transport concerns out of the domain service and gives tests/automation one
 // narrow place to exercise user-visible operations.
@@ -10,7 +8,6 @@ type Commands struct {
 	documents  DocumentCommands
 	encryption EncryptionCommands
 	settings   SettingsCommands
-	cloud      CloudBackupCommands
 }
 
 func NewCommands(service *JournalService) *Commands {
@@ -19,7 +16,6 @@ func NewCommands(service *JournalService) *Commands {
 		documents:  documentCommandService{service: service},
 		encryption: encryptionCommandService{service: service},
 		settings:   settingsCommandService{service: service},
-		cloud:      cloudBackupCommandService{service: service},
 	}
 }
 
@@ -64,15 +60,6 @@ type EncryptionCommands interface {
 type SettingsCommands interface {
 	Get() (AppSettingsResponse, error)
 	Update(settings AppSettingsPatch) (AppSettingsResponse, error)
-}
-
-type CloudBackupCommands interface {
-	Status() (CloudBackupStatusResponse, error)
-	Configure(ctx context.Context, command CloudBackupEndpointCommand) (CloudBackupStatusResponse, error)
-	UnlockCredentials(password string) (CloudBackupStatusResponse, error)
-	Sync(ctx context.Context) (CloudBackupStatusResponse, error)
-	Restore(ctx context.Context, password string) (CloudBackupStatusResponse, error)
-	Disconnect() error
 }
 
 type libraryCommandService struct{ service *JournalService }
@@ -173,22 +160,3 @@ func (c settingsCommandService) Get() (AppSettingsResponse, error) { return c.se
 func (c settingsCommandService) Update(settings AppSettingsPatch) (AppSettingsResponse, error) {
 	return c.service.UpdateAppSettings(settings)
 }
-
-type cloudBackupCommandService struct{ service *JournalService }
-
-func (c cloudBackupCommandService) Status() (CloudBackupStatusResponse, error) {
-	return c.service.GetCloudBackupStatus()
-}
-func (c cloudBackupCommandService) Configure(ctx context.Context, command CloudBackupEndpointCommand) (CloudBackupStatusResponse, error) {
-	return c.service.ConfigureCloudBackup(ctx, command)
-}
-func (c cloudBackupCommandService) UnlockCredentials(password string) (CloudBackupStatusResponse, error) {
-	return c.service.UnlockCloudBackupCredentials(password)
-}
-func (c cloudBackupCommandService) Sync(ctx context.Context) (CloudBackupStatusResponse, error) {
-	return c.service.SyncCloudBackup(ctx)
-}
-func (c cloudBackupCommandService) Restore(ctx context.Context, password string) (CloudBackupStatusResponse, error) {
-	return c.service.RestoreCloudBackup(ctx, password)
-}
-func (c cloudBackupCommandService) Disconnect() error { return c.service.DisconnectCloudBackup() }

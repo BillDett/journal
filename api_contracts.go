@@ -69,6 +69,53 @@ type DocumentSaveResponse struct {
 	Version   int64  `json:"version"`
 }
 
+// CRDTSessionResponse is deliberately transport-neutral. Snapshot and update
+// fields contain base64-encoded native Yjs V1 update bytes only because Wails
+// bindings currently marshal JSON; SQLite stores the underlying bytes.
+type CRDTSessionResponse struct {
+	SessionID     string   `json:"sessionId"`
+	DocumentID    string   `json:"documentId"`
+	FormatVersion int      `json:"formatVersion"`
+	Bootstrap     bool     `json:"bootstrap"`
+	Snapshot      string   `json:"snapshot"`
+	Updates       []string `json:"updates"`
+	ThroughSeq    int64    `json:"throughSeq"`
+	Generation    int      `json:"generation"`
+}
+
+type CRDTUpdateCommand struct {
+	SessionID string           `json:"sessionId"`
+	Updates   []CRDTWireUpdate `json:"updates"`
+}
+
+// CRDTWireUpdate carries a stable client-generated message ID. Retrying the
+// same Wails call after an ambiguous acknowledgement is therefore exactly-once
+// at the SQLite log boundary, while the Yjs payload stays transport-neutral.
+type CRDTWireUpdate struct {
+	ID   string `json:"id"`
+	Data string `json:"data"`
+}
+
+type CRDTDurabilityResponse struct {
+	DocumentID string `json:"documentId"`
+	SaveState  string `json:"saveState"`
+	ThroughSeq int64  `json:"throughSeq"`
+	SavedAt    string `json:"savedAt"`
+}
+
+type CRDTBootstrapCommand struct {
+	SessionID string `json:"sessionId"`
+	Snapshot  string `json:"snapshot"`
+}
+
+type CRDTProjectionCommand struct {
+	SessionID   string         `json:"sessionId"`
+	ThroughSeq  int64          `json:"throughSeq"`
+	StateVector string         `json:"stateVector"`
+	Snapshot    string         `json:"snapshot"`
+	Content     map[string]any `json:"content"`
+}
+
 type DocumentAttachmentResponse struct {
 	ID           string `json:"id"`
 	DocumentID   string `json:"documentId"`
@@ -103,38 +150,6 @@ type AppSettingsPatch struct {
 type JournalDatabaseLocationResponse struct {
 	Path      string `json:"path"`
 	CanReveal bool   `json:"canReveal"`
-}
-
-type CloudBackupEndpointCommand struct {
-	EndpointURL     string `json:"endpointUrl"`
-	Bucket          string `json:"bucket"`
-	Region          string `json:"region"`
-	Prefix          string `json:"prefix"`
-	ForcePathStyle  bool   `json:"forcePathStyle"`
-	DisplayName     string `json:"displayName"`
-	AccessKeyID     string `json:"accessKeyId"`
-	SecretAccessKey string `json:"secretAccessKey"`
-	SessionToken    string `json:"sessionToken"`
-	MasterPassword  string `json:"masterPassword"`
-}
-
-type CloudBackupStatusResponse struct {
-	Configured        bool   `json:"configured"`
-	Validated         bool   `json:"validated"`
-	EndpointURL       string `json:"endpointUrl"`
-	Bucket            string `json:"bucket"`
-	Region            string `json:"region"`
-	Prefix            string `json:"prefix"`
-	ForcePathStyle    bool   `json:"forcePathStyle"`
-	DisplayName       string `json:"displayName"`
-	LastBackupAt      string `json:"lastBackupAt"`
-	LastRemoteAt      string `json:"lastRemoteAt"`
-	LastSnapshotID    string `json:"lastSnapshotId"`
-	LastManifestToken string `json:"lastManifestToken"`
-	LastError         string `json:"lastError"`
-	Unsynced          bool   `json:"unsynced"`
-	Busy              bool   `json:"busy"`
-	CredentialsReady  bool   `json:"credentialsReady"`
 }
 
 // TrashItemCommand makes the destructive state transition explicit. The

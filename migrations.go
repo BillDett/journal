@@ -12,8 +12,11 @@ type SchemaMigration struct {
 
 var schemaMigrations = []SchemaMigration{
 	{Version: 1, Name: "initial library, search, encryption, and attachments", Apply: (*JournalService).migrateV1},
-	{Version: 2, Name: "cloud backup configuration and sync state", Apply: (*JournalService).migrateV2},
-	{Version: 3, Name: "cloud backup durable change generation", Apply: (*JournalService).migrateV3},
+	// Versions 2 and 3 are retained as historical no-ops so a 1.4 database can
+	// upgrade directly to 1.6 without an intermediate 1.5 installation.
+	{Version: 2, Name: "retired cloud backup configuration", Apply: (*JournalService).migrateV2},
+	{Version: 3, Name: "retired cloud backup state", Apply: (*JournalService).migrateV3},
+	{Version: 4, Name: "local CRDT document persistence", Apply: (*JournalService).migrateV4},
 }
 
 func (s *JournalService) migrate() error {

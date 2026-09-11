@@ -294,19 +294,15 @@ func (s *JournalService) exportDocumentAttachments(documentID string, content ma
 		return nil, err
 	}
 
-	rows, err := s.db.Query(
-		`SELECT id, mime_type, original_name, content_blob, content_ciphertext
-		 FROM document_attachments WHERE document_id = ? AND detached_at IS NULL`,
-		documentID,
-	)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
+	// Resolve the key before opening rows: the result set holds SQLite's
+	// only connection, so any subsequent s.db lookup would deadlock export
+	// and all other database work (including shutdown).
 	var key []byte
 	if item.EncryptionState == EncryptionEncrypted {
-		journalID, err := s.journalIDForItem(documentID)
+		if !item.EncryptionKeyID.Valid {
+			return nil, fmt.Errorf("encrypted document key is missing")
+		}
+		journalID, err := s.encryptionJournalIDForItem(documentID)
 		if err != nil {
 			return nil, err
 		}
@@ -316,6 +312,16 @@ func (s *JournalService) exportDocumentAttachments(documentID string, content ma
 			return nil, ErrEncryptionLocked
 		}
 	}
+
+	rows, err := s.db.Query(
+		`SELECT id, mime_type, original_name, content_blob, content_ciphertext
+		 FROM document_attachments WHERE document_id = ? AND detached_at IS NULL`,
+		documentID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
 
 	var attachments []exportAttachmentData
 	for rows.Next() {
@@ -329,9 +335,6 @@ func (s *JournalService) exportDocumentAttachments(documentID string, content ma
 		}
 		data := contentBlob
 		if item.EncryptionState == EncryptionEncrypted {
-			if !item.EncryptionKeyID.Valid {
-				return nil, fmt.Errorf("encrypted document key is missing")
-			}
 			plaintext, err := openField(key, "document_attachments", id, "content_blob", item.EncryptionKeyID.String, contentCiphertext)
 			if err != nil {
 				return nil, err

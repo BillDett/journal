@@ -35,12 +35,10 @@ type JournalService struct {
 	mu               sync.Mutex
 	operationMu      sync.Mutex
 	cryptoMu         sync.Mutex
-	cloudMu          sync.Mutex
-	cloudWriteMu     sync.RWMutex
-	cloudBusy        bool
-	cloudCredentials *cloudCredentials
 	pending          map[string]pendingDraft
 	lastDraftVersion map[string]int64
+	crdtMu           sync.Mutex
+	crdtSessions     map[string]crdtSession
 	masterKey        []byte
 	journalKeys      map[string][]byte
 }
@@ -56,7 +54,12 @@ func OpenJournalService(path string) (*JournalService, error) {
 		db:               repository.db,
 		pending:          map[string]pendingDraft{},
 		lastDraftVersion: map[string]int64{},
+		crdtSessions:     map[string]crdtSession{},
 		journalKeys:      map[string][]byte{},
+	}
+	if err := service.backupBeforeCRDTMigration(); err != nil {
+		_ = repository.Close()
+		return nil, err
 	}
 	if err := service.migrate(); err != nil {
 		_ = repository.Close()
@@ -65,7 +68,17 @@ func OpenJournalService(path string) (*JournalService, error) {
 	return service, nil
 }
 
+func (s *JournalService) backupBeforeCRDTMigration() error {
+	var version int
+	if err := s.db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil {
+		return err
+	}
+	if version == 0 || version >= 4 {
+		return nil
+	}
+	return s.repository.BackupBeforeCRDTMigration()
+}
+
 func (s *JournalService) Close() error {
-	s.clearCloudCredentials()
 	return s.repository.Close()
 }

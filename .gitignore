@@ -12,6 +12,7 @@
 
 # Local runtime data
 *.db
+!testdata/fixtures/*.db
 *.db-shm
 *.db-wal
 *.sqlite

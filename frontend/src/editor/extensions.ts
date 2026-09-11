@@ -1,4 +1,5 @@
 import CharacterCount from '@tiptap/extension-character-count'
+import Collaboration from '@tiptap/extension-collaboration'
 import Highlight from '@tiptap/extension-highlight'
 import Link from '@tiptap/extension-link'
 import Placeholder from '@tiptap/extension-placeholder'
@@ -15,12 +16,15 @@ import {AttachmentImage} from './attachmentImage'
 import {BlockIndent} from './blockIndent'
 import {ListNormalization} from './listNormalization'
 import {ResizableTable} from './resizableTable'
+import type * as Y from 'yjs'
 
-export const editorExtensions = [
+export function editorExtensions(ydoc?: Y.Doc) {
+  return [
   StarterKit.configure({
     heading: {
       levels: [1, 2, 3, 4, 5, 6],
     },
+    undoRedo: ydoc ? false : undefined,
   }),
   BlockIndent,
   ListNormalization,
@@ -58,4 +62,6 @@ export const editorExtensions = [
     types: ['heading', 'paragraph', 'listItem', 'taskItem', 'attachmentImage', 'table'],
   }),
   CharacterCount,
+  ...(ydoc ? [Collaboration.configure({document: ydoc, field: 'default'})] : []),
 ]
+}
