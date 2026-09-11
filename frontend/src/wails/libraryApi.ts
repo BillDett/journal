@@ -88,41 +88,32 @@ export type AppSettingsPatch = {
   libraryWidth: number
 }
 
+export type CRDTSessionResponse = {
+  sessionId: string
+  documentId: string
+  formatVersion: number
+  bootstrap: boolean
+  snapshot: string
+  updates: string[]
+  throughSeq: number
+  generation: number
+}
+
+export type CRDTDurabilityResponse = {
+  documentId: string
+  saveState: string
+  throughSeq: number
+  savedAt: string
+}
+
+export type CRDTWireUpdate = {
+  id: string
+  data: string
+}
+
 export type JournalDatabaseLocationResponse = {
   path: string
   canReveal: boolean
-}
-
-export type CloudBackupEndpointCommand = {
-  endpointUrl: string
-  bucket: string
-  region: string
-  prefix: string
-  forcePathStyle: boolean
-  displayName: string
-  accessKeyId: string
-  secretAccessKey: string
-  sessionToken: string
-  masterPassword: string
-}
-
-export type CloudBackupStatusResponse = {
-  configured: boolean
-  validated: boolean
-  endpointUrl: string
-  bucket: string
-  region: string
-  prefix: string
-  forcePathStyle: boolean
-  displayName: string
-  lastBackupAt: string
-  lastRemoteAt: string
-  lastSnapshotId: string
-  lastManifestToken: string
-  lastError: string
-  unsynced: boolean
-  busy: boolean
-  credentialsReady: boolean
 }
 
 export type TrashItemCommand = {
@@ -180,13 +171,12 @@ type BackendAPI = {
   RevealJournalDatabaseFile: () => Promise<void>
   GetAppSettings: () => Promise<AppSettingsResponse>
   UpdateAppSettings: (settings: AppSettingsPatch) => Promise<AppSettingsResponse>
-  GetCloudBackupStatus: () => Promise<CloudBackupStatusResponse>
-  GetCloudBackupStatusAfterFlush: () => Promise<CloudBackupStatusResponse>
-  ConfigureCloudBackup: (command: CloudBackupEndpointCommand) => Promise<CloudBackupStatusResponse>
-  UnlockCloudBackupCredentials: (masterPassword: string) => Promise<CloudBackupStatusResponse>
-  SyncCloudBackup: () => Promise<CloudBackupStatusResponse>
-  RestoreCloudBackup: (masterPassword: string) => Promise<void>
-  DisconnectCloudBackup: () => Promise<void>
+  OpenCRDTSession: (documentId: string) => Promise<CRDTSessionResponse>
+  BootstrapCRDTDocument: (command: {sessionId: string, snapshot: string}) => Promise<CRDTDurabilityResponse>
+  SubmitCRDTUpdates: (command: {sessionId: string, updates: CRDTWireUpdate[]}) => Promise<CRDTDurabilityResponse>
+  MaterializeCRDTProjection: (command: {sessionId: string, throughSeq: number, stateVector: string, snapshot: string, content: ProseMirrorDoc}) => Promise<void>
+  FlushCRDTSession: (sessionId: string) => Promise<CRDTDurabilityResponse>
+  CloseCRDTSession: (sessionId: string) => Promise<void>
 }
 
 type WailsWindow = Window & {
@@ -247,13 +237,12 @@ function missingBackend(): BackendAPI {
     RevealJournalDatabaseFile: fail,
     GetAppSettings: fail,
     UpdateAppSettings: fail,
-    GetCloudBackupStatus: fail,
-    GetCloudBackupStatusAfterFlush: fail,
-    ConfigureCloudBackup: fail,
-    UnlockCloudBackupCredentials: fail,
-    SyncCloudBackup: fail,
-    RestoreCloudBackup: fail,
-    DisconnectCloudBackup: fail,
+    OpenCRDTSession: fail,
+    BootstrapCRDTDocument: fail,
+    SubmitCRDTUpdates: fail,
+    MaterializeCRDTProjection: fail,
+    FlushCRDTSession: fail,
+    CloseCRDTSession: fail,
   }
 }
 

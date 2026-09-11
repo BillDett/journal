@@ -1,0 +1,51 @@
+{
+  "snapshot": "AQUqAAcBB2RlZmF1bHQDCXBhcmFncmFwaAcAKgAGBAAqAQ1CZWZvcmUgcmVwbGF5hyoAAw9hdHRhY2htZW50SW1hZ2UoACoPDGF0dGFjaG1lbnRJZAF3DnNuYXBzaG90LWltYWdlAA==",
+  "update": "AQMqEYQqDhUgcGx1cyByZWNvdmVyZWQgZWRpdHOHKg8DD2F0dGFjaG1lbnRJbWFnZSgAKiYMYXR0YWNobWVudElkAXcNcGVuZGluZy1pbWFnZQA=",
+  "fullSnapshot": "AQgqAAcBB2RlZmF1bHQDCXBhcmFncmFwaAcAKgAGBAAqAQ1CZWZvcmUgcmVwbGF5hyoAAw9hdHRhY2htZW50SW1hZ2UoACoPDGF0dGFjaG1lbnRJZAF3DnNuYXBzaG90LWltYWdlhCoOFSBwbHVzIHJlY292ZXJlZCBlZGl0c4cqDwMPYXR0YWNobWVudEltYWdlKAAqJgxhdHRhY2htZW50SWQBdw1wZW5kaW5nLWltYWdlAA==",
+  "content": {
+    "type": "doc",
+    "content": [
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Before replay"
+          }
+        ]
+      },
+      {
+        "type": "attachmentImage",
+        "attrs": {
+          "attachmentId": "snapshot-image"
+        }
+      }
+    ]
+  },
+  "recoveredContent": {
+    "type": "doc",
+    "content": [
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "Before replay plus recovered edits"
+          }
+        ]
+      },
+      {
+        "type": "attachmentImage",
+        "attrs": {
+          "attachmentId": "snapshot-image"
+        }
+      },
+      {
+        "type": "attachmentImage",
+        "attrs": {
+          "attachmentId": "pending-image"
+        }
+      }
+    ]
+  }
+}

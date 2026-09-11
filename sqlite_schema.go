@@ -111,63 +111,61 @@ func (s *JournalService) migrateV1() error {
 }
 
 func (s *JournalService) migrateV2() error {
-	_, err := s.db.Exec(`CREATE TABLE IF NOT EXISTS cloud_backup_config (
-		id INTEGER PRIMARY KEY CHECK (id = 1),
-		endpoint_url TEXT NOT NULL,
-		bucket TEXT NOT NULL,
-		region TEXT NOT NULL,
-		prefix TEXT NOT NULL DEFAULT '',
-		force_path_style INTEGER NOT NULL DEFAULT 0,
-		display_name TEXT NOT NULL DEFAULT '',
-		credential_nonce BLOB NOT NULL,
-		credential_ciphertext BLOB NOT NULL,
-		validated_at TEXT NULL,
-		last_manifest_token TEXT NULL,
-		last_snapshot_id TEXT NULL,
-		last_snapshot_sha256 TEXT NULL,
-		last_snapshot_size INTEGER NULL,
-		last_backup_at TEXT NULL,
-		last_remote_at TEXT NULL,
-		last_error TEXT NULL,
-		created_at TEXT NOT NULL,
-		updated_at TEXT NOT NULL
-	)`)
-	return err
+	return nil
 }
 
-// migrateV3 records content mutations independently from row timestamps. A
-// timestamp scan cannot observe a deletion because the changed row is gone.
+// migrateV3 is a retained historical slot for databases that briefly passed
+// through the retired Cloud Backup release.
 func (s *JournalService) migrateV3() error {
-	return ensureCloudBackupState(s.db)
+	return nil
 }
 
-func ensureCloudBackupState(db execer) error {
-	statements := []string{
-		`CREATE TABLE IF NOT EXISTS cloud_backup_state (
-			id INTEGER PRIMARY KEY CHECK (id = 1),
-			change_generation INTEGER NOT NULL DEFAULT 0,
-			last_backup_generation INTEGER NULL
-		)`,
-		`INSERT OR IGNORE INTO cloud_backup_state (id, change_generation, last_backup_generation) VALUES (1, 0, NULL)`,
+func (s *JournalService) migrateV4() error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
 	}
-	for _, statement := range statements {
-		if _, err := db.Exec(statement); err != nil {
-			return err
-		}
-	}
+	defer rollback(tx)
+
 	for _, table := range []string{"items", "documents", "document_attachments", "app_settings", "encryption_master", "journal_encryption_keys"} {
-		for _, event := range []string{"INSERT", "UPDATE", "DELETE"} {
-			name := "cloud_backup_generation_" + table + "_" + strings.ToLower(event)
-			statement := fmt.Sprintf(`CREATE TRIGGER IF NOT EXISTS %s AFTER %s ON %s
-				BEGIN
-					UPDATE cloud_backup_state SET change_generation = change_generation + 1 WHERE id = 1;
-				END`, name, event, table)
-			if _, err := db.Exec(statement); err != nil {
+		for _, event := range []string{"insert", "update", "delete"} {
+			if _, err := tx.Exec(fmt.Sprintf(`DROP TRIGGER IF EXISTS cloud_backup_generation_%s_%s`, table, event)); err != nil {
 				return err
 			}
 		}
 	}
-	return nil
+	statements := []string{
+		`DROP TABLE IF EXISTS cloud_backup_config`,
+		`DROP TABLE IF EXISTS cloud_backup_state`,
+		`CREATE TABLE IF NOT EXISTS document_crdt_state (
+			document_id TEXT PRIMARY KEY REFERENCES documents(item_id) ON DELETE CASCADE,
+			generation INTEGER NOT NULL DEFAULT 1,
+			format_version INTEGER NOT NULL DEFAULT 1,
+			snapshot BLOB NULL,
+			snapshot_key_id TEXT NULL,
+			snapshot_through_seq INTEGER NOT NULL DEFAULT 0,
+			materialized_through_seq INTEGER NOT NULL DEFAULT 0,
+			materialized_state_vector BLOB NULL,
+			updated_at TEXT NOT NULL
+		)`,
+		`CREATE TABLE IF NOT EXISTS document_crdt_updates (
+			seq INTEGER PRIMARY KEY AUTOINCREMENT,
+			update_id TEXT NOT NULL UNIQUE,
+			document_id TEXT NOT NULL REFERENCES documents(item_id) ON DELETE CASCADE,
+			generation INTEGER NOT NULL,
+			update_blob BLOB NOT NULL,
+			key_id TEXT NULL,
+			created_at TEXT NOT NULL
+		)`,
+		`CREATE INDEX IF NOT EXISTS document_crdt_updates_by_document
+			ON document_crdt_updates(document_id, generation, seq)`,
+	}
+	for _, statement := range statements {
+		if _, err := tx.Exec(statement); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 func (s *JournalService) ensureTrash() error {

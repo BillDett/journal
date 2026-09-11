@@ -272,6 +272,48 @@ func (s *JournalService) PurgeDetachedAttachments(gracePeriod time.Duration) err
 	return err
 }
 
+// Decryption replaces the source document in the same transaction. Preserve
+// attachment identities so opaque Yjs snapshots, outstanding updates, and undo
+// references remain valid. Include detached images that may be reattached by
+// an update not yet reflected in the JSON projection.
+func (s *JournalService) decryptDocumentAttachmentsTx(tx *sql.Tx, sourceDocumentID, targetDocumentID string, key []byte, keyID string) error {
+	rows, err := tx.Query(`SELECT id FROM document_attachments WHERE document_id = ?`, sourceDocumentID)
+	if err != nil {
+		return err
+	}
+	var attachmentIDs []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		attachmentIDs = append(attachmentIDs, id)
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	// Process one image at a time rather than holding the entire document's
+	// decrypted attachments in memory.
+	for _, id := range attachmentIDs {
+		var ciphertext []byte
+		if err := tx.QueryRow(`SELECT content_ciphertext FROM document_attachments WHERE id = ?`, id).Scan(&ciphertext); err != nil {
+			return err
+		}
+		plaintext, err := openField(key, "document_attachments", id, "content_blob", keyID, ciphertext)
+		if err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`UPDATE document_attachments SET document_id = ?, content_blob = ?, content_ciphertext = NULL WHERE id = ?`, targetDocumentID, plaintext, id); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (s *JournalService) copyDocumentAttachmentsTx(tx *sql.Tx, sourceDocumentID string, targetDocumentID string, key []byte, keyID string) (map[string]string, error) {
 	rows, err := tx.Query(
 		`SELECT id, mime_type, original_name, size_bytes, content_blob, content_ciphertext

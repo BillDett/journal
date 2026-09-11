@@ -1,5 +1,11 @@
 // Coordinates client-side operations that can otherwise complete out of order.
 // It is framework-agnostic so UI components can share the same semantics.
+export async function flushBeforeTransition(flush: () => Promise<boolean>, transition: () => void) {
+  if (!(await flush())) return false
+  transition()
+  return true
+}
+
 export class OperationCoordinator {
   private treeRequestVersion = 0
   private documentRequestVersion = 0

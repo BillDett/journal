@@ -320,6 +320,13 @@ func (s *JournalService) UpdateDocumentDraft(id string, content map[string]any, 
 	if item.Kind != KindDocument {
 		return DocumentDraftResponse{}, fmt.Errorf("item is not a document")
 	}
+	var crdtInitialized bool
+	if err := s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM document_crdt_state WHERE document_id = ?)`, id).Scan(&crdtInitialized); err != nil {
+		return DocumentDraftResponse{}, err
+	}
+	if crdtInitialized {
+		return DocumentDraftResponse{}, fmt.Errorf("document is CRDT-authoritative; use the CRDT session API")
+	}
 	s.mu.Lock()
 	if version <= s.lastDraftVersion[id] {
 		currentVersion := s.lastDraftVersion[id]

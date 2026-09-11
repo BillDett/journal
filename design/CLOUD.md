@@ -1,3 +1,13 @@
+# Archived: superseded Cloud Journals design
+
+This historical OCI/cloud-Journal proposal is not active product scope. Journal
+1.6 adopts local CRDT persistence with optional future collaboration instead;
+see [Journal_CRDT_Plan.md](Journal_CRDT_Plan.md). It must not be implemented
+as a separate storage mode, cached database mount, artifact publisher, or edit
+lease.
+
+---
+
 # Cloud Journals Design Specification
 
 ## Table Of Contents

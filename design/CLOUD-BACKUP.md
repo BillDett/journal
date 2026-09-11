@@ -1,4 +1,10 @@
-# Cloud Backup V1
+# Archived: Cloud Backup V1
+
+This feature was retired for Journal 1.6 and is retained only as historical
+design context. Journal no longer configures or syncs whole-database cloud
+backups; see [Journal_CRDT_Plan.md](Journal_CRDT_Plan.md).
+
+---
 
 ## 1. Purpose
 
